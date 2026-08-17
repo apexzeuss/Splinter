@@ -2,23 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { DocId, ProjectDoc, TaskItem, ArchitectureDirective, SplinterNode, LogEntry, UserCoords } from './types';
 import { INITIAL_DOCS, INITIAL_TASKS, INITIAL_DIRECTIVES, INITIAL_NODES, INITIAL_LOGS } from './data/projectData';
 import { ModernHeader, AppNavPage } from './components/ModernHeader';
-import { HomePage } from './components/HomePage';
-import { ShadowRouterSimulator } from './components/ShadowRouterSimulator';
-import { AnalyticsPage } from './components/AnalyticsPage';
-import { CommunityPage } from './components/CommunityPage';
-import { DeveloperApiPage } from './components/DeveloperApiPage';
-import { AboutMissionPage } from './components/AboutMissionPage';
+import { UnifiedCoolWalkDashboard } from './components/UnifiedCoolWalkDashboard';
 import { Sidebar } from './components/Sidebar';
 import { HandoffOverview } from './components/HandoffOverview';
 import { DocViewer } from './components/DocViewer';
-import { NodeRegistry } from './components/NodeRegistry';
-import { RagSandbox } from './components/RagSandbox';
-import { MemoryConsole } from './components/MemoryConsole';
 import { LocationModal } from './components/LocationModal';
 import { Footer } from './components/Footer';
 
 export default function App() {
-  const [currentPage, setCurrentPage] = useState<AppNavPage>('home');
+  const [currentPage, setCurrentPage] = useState<AppNavPage>('unified');
   const [selectedDocId, setSelectedDocId] = useState<DocId>('handoff.md');
   const [docs, setDocs] = useState<Record<string, ProjectDoc>>(INITIAL_DOCS);
   const [tasks, setTasks] = useState<TaskItem[]>(INITIAL_TASKS);
@@ -27,15 +19,14 @@ export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>(INITIAL_LOGS);
   const [lastSyncTime, setLastSyncTime] = useState<string>('2026-08-17 01:40:00');
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [isSimulating, setIsSimulating] = useState<boolean>(false);
   const [isLocationModalOpen, setIsLocationModalOpen] = useState<boolean>(false);
 
   // Real Browser Geolocation State
   const [userCoords, setUserCoords] = useState<UserCoords | null>({
-    lat: 33.4484,
-    lng: -112.0740,
-    city: 'Phoenix, AZ',
-    tempC: 39.5,
+    lat: 51.5074,
+    lng: -0.1278,
+    city: 'London, UK',
+    tempC: 22.4,
     isLive: true,
     source: 'DEFAULT'
   });
@@ -49,7 +40,7 @@ export default function App() {
 
     const resolveWeatherAndCity = async (lat: number, lng: number, fallbackCity: string, isGPS: boolean) => {
       let resolvedCity = fallbackCity;
-      let temp = 31.5;
+      let temp = 22.4;
 
       // 1. Reverse Geocode for clean City/Town name
       try {
@@ -120,7 +111,7 @@ export default function App() {
           }
         }
       } catch (err) {
-        console.log("ipwho.is failed, trying ipapi.co...", err);
+        console.log("ipwho.is failed, trying freeipapi.com...", err);
       }
 
       // Secondary IP Fallback
@@ -140,10 +131,10 @@ export default function App() {
 
       // Standard default fallback if all offline
       setUserCoords({
-        lat: 33.4484,
-        lng: -112.0740,
-        city: "Phoenix, AZ",
-        tempC: 39.5,
+        lat: 51.5074,
+        lng: -0.1278,
+        city: "London, UK",
+        tempC: 22.4,
         isLive: true
       });
       setIsLocating(false);
@@ -213,36 +204,8 @@ export default function App() {
     }));
   };
 
-  // Manual Sync trigger
-  const handleSync = () => {
-    setIsSyncing(true);
-    setTimeout(() => {
-      const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
-      setLastSyncTime(now);
-      setIsSyncing(false);
-    }, 500);
-  };
-
-  // Toggle node active state
-  const handleToggleNodeStatus = (nodeId: string) => {
-    setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, status: n.status === 'active' ? 'idle' : 'active' } : n));
-  };
-
-  // Simulate Ingestion Batch execution
-  const handleSimulateIngestion = () => {
-    setIsSimulating(true);
-    setTimeout(() => {
-      setNodes(prev => prev.map(n => ({
-        ...n,
-        processedCount: n.status === 'active' ? n.processedCount + 48 : n.processedCount
-      })));
-      setIsSimulating(false);
-    }, 1200);
-  };
-
   const completedCount = tasks.filter(t => t.completed).length;
-
-  const isDevWorkspace = ['handoff', 'docs', 'nodes', 'rag', 'memory'].includes(currentPage);
+  const isDevWorkspace = ['handoff', 'docs'].includes(currentPage);
 
   return (
     <div className="w-full h-full bg-[#070709] text-zinc-300 font-sans flex flex-col overflow-hidden select-none">
@@ -285,15 +248,11 @@ export default function App() {
             selectedDocId={selectedDocId}
             onSelectDoc={(id) => {
               setSelectedDocId(id);
-              if (id === 'handoff.md') {
-                setCurrentPage('handoff');
-              } else {
-                setCurrentPage('docs');
-              }
+              setCurrentPage('docs');
             }}
-            activeView={currentPage === 'router' ? 'simulator' : (currentPage as any)}
+            activeView={currentPage === 'unified' ? 'simulator' : (currentPage as any)}
             setActiveView={(v: any) => {
-              if (v === 'simulator') setCurrentPage('router');
+              if (v === 'simulator') setCurrentPage('unified');
               else setCurrentPage(v);
             }}
             completedTasksCount={completedCount}
@@ -302,80 +261,24 @@ export default function App() {
         )}
 
         <main className="flex-1 flex flex-col bg-[#070709] overflow-hidden">
-          {/* 1. Consumer Home Page */}
-          {currentPage === 'home' && (
-            <HomePage
-              onNavigateToRouter={() => setCurrentPage('router')}
-              userCoords={userCoords}
-              onRequestLocation={handleRequestLocation}
+          {currentPage === 'unified' && (
+            <UnifiedCoolWalkDashboard
+              userCoords={userCoords || { lat: 51.5074, lng: -0.1278, city: 'London, UK', tempC: 22.4, isLive: true }}
+              onLocationChange={(lat, lng, city) => {
+                setUserCoords(prev => prev ? { ...prev, lat, lng, city } : { lat, lng, city, tempC: 22.4, isLive: true });
+              }}
               onOpenLocationModal={() => setIsLocationModalOpen(true)}
+              onRequestLocation={handleRequestLocation}
               isLocating={isLocating}
             />
           )}
 
-          {/* 2. Live 2.5D Router Simulator */}
-          {currentPage === 'router' && (
-            <ShadowRouterSimulator
-              userCoords={userCoords}
-              onOpenLocationModal={() => setIsLocationModalOpen(true)}
-            />
-          )}
-
-          {/* 3. Urban Heat Island Analytics Page */}
-          {currentPage === 'analytics' && <AnalyticsPage />}
-
-          {/* 4. Community Shade & Cooling Network */}
-          {currentPage === 'community' && <CommunityPage />}
-
-          {/* 5. Developer API / SDK Page */}
-          {currentPage === 'api' && <DeveloperApiPage />}
-
-          {/* 6. Mission & About Page */}
-          {currentPage === 'about' && <AboutMissionPage />}
-
-          {/* Developer / Project Artifact Views */}
-          {currentPage === 'handoff' && (
-            <HandoffOverview
-              tasks={tasks}
-              directives={directives}
-              onToggleTask={handleToggleTask}
-              onAddTask={handleAddTask}
-              onNavigateToDocs={(docId) => {
-                setSelectedDocId(docId as DocId);
-                setCurrentPage('docs');
-              }}
-              onNavigateToNodes={() => setCurrentPage('nodes')}
-              lastSyncTime={lastSyncTime}
-            />
-          )}
-
+          {/* Architecture & System Documentation View */}
           {currentPage === 'docs' && (
             <DocViewer
               doc={docs[selectedDocId]}
               onUpdateContent={handleUpdateDocContent}
               onSelectDoc={(id) => setSelectedDocId(id)}
-            />
-          )}
-
-          {currentPage === 'nodes' && (
-            <NodeRegistry
-              nodes={nodes}
-              onToggleNodeStatus={handleToggleNodeStatus}
-              onSimulateIngestion={handleSimulateIngestion}
-              isSimulating={isSimulating}
-              onUpdateNodeConfig={(nodeId, config) => {
-                setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, config } : n));
-              }}
-            />
-          )}
-
-          {currentPage === 'rag' && <RagSandbox />}
-
-          {currentPage === 'memory' && (
-            <MemoryConsole
-              onSync={handleSync}
-              isSyncing={isSyncing}
-              lastSyncTime={lastSyncTime}
             />
           )}
         </main>
@@ -384,9 +287,9 @@ export default function App() {
       {/* Footer info */}
       <Footer
         logs={logs}
-        statusText={userCoords?.isLive ? `LIVE GPS ONLINE (${userCoords.city})` : 'STANDING BY'}
+        statusText={userCoords?.isLive ? `OPEN-METEO LIVE (${userCoords.city} · ${userCoords.tempC}°C)` : 'STANDING BY'}
         taskId={taskId}
-        isExecuting={isSimulating}
+        isExecuting={false}
       />
     </div>
   );
