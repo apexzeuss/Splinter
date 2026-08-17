@@ -125,17 +125,17 @@ export default function App() {
 
       // Secondary IP Fallback
       try {
-        const ipRes2 = await fetch('https://ipapi.co/json/');
+        const ipRes2 = await fetch('https://freeipapi.com/api/json');
         if (ipRes2.ok) {
           const ipData2 = await ipRes2.json();
           if (typeof ipData2.latitude === 'number') {
-            const cityStr2 = `${ipData2.city || 'Local Area'}, ${ipData2.country_code || ''}`.trim();
+            const cityStr2 = `${ipData2.cityName || 'Local Area'}, ${ipData2.countryCode || ''}`.trim();
             await resolveWeatherAndCity(ipData2.latitude, ipData2.longitude, cityStr2, false);
             return;
           }
         }
       } catch (err2) {
-        console.log("ipapi.co failed, using standard fallback", err2);
+        console.log("freeipapi failed, using standard fallback", err2);
       }
 
       // Standard default fallback if all offline
