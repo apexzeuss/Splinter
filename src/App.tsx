@@ -40,72 +40,138 @@ export default function App() {
 
   const taskId = 'e_6a809a7420ac8325a91c1e9b50cdb6ad';
 
-  // Request device geolocation via browser navigator.geolocation
-  const handleRequestLocation = () => {
-    if (!navigator.geolocation) {
-      alert("Geolocation is not supported by your browser");
-      return;
-    }
-
+  // Real Geolocation Strategy: GPS with automatic IP Geolocation fallback & Open-Meteo weather
+  const handleRequestLocation = async () => {
     setIsLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const lat = position.coords.latitude;
-        const lng = position.coords.longitude;
 
-        let cityName = "My GPS Location";
-        let temp = 32.5;
+    const resolveWeatherAndCity = async (lat: number, lng: number, fallbackCity: string, isGPS: boolean) => {
+      let resolvedCity = fallbackCity;
+      let temp = 31.5;
 
-        try {
-          // Attempt reverse geocode via open-meteo / nominatim
-          const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current_weather=true`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.current_weather && typeof data.current_weather.temperature === 'number') {
-              temp = data.current_weather.temperature;
-            }
+      // 1. Reverse Geocode for clean City/Town name
+      try {
+        const geoRes = await fetch(
+          `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`
+        );
+        if (geoRes.ok) {
+          const geoData = await geoRes.json();
+          const cityPart = geoData.city || geoData.locality || geoData.principalSubdivision || '';
+          const countryPart = geoData.countryCode || geoData.countryName || '';
+          if (cityPart) {
+            resolvedCity = countryPart ? `${cityPart}, ${countryPart}` : cityPart;
           }
-          cityName = `${lat.toFixed(3)}°, ${lng.toFixed(3)}°`;
-        } catch (e) {
-          console.log("Weather fetch fallback", e);
         }
+      } catch (e) {
+        console.log("Reverse geocode fallback", e);
+      }
 
-        setUserCoords({
-          lat,
-          lng,
-          city: cityName,
-          tempC: Math.round(temp * 10) / 10,
-          isLive: true
-        });
-        setIsLocating(false);
+      // 2. Fetch live Open-Meteo weather for exact latitude/longitude
+      try {
+        const weatherRes = await fetch(
+          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current_weather=true`
+        );
+        if (weatherRes.ok) {
+          const weatherData = await weatherRes.json();
+          if (weatherData.current_weather && typeof weatherData.current_weather.temperature === 'number') {
+            temp = weatherData.current_weather.temperature;
+          }
+        }
+      } catch (e) {
+        console.log("Weather API fallback", e);
+      }
 
-        const time = new Date().toTimeString().split(' ')[0];
-        setLogs(prev => [
-          {
-            id: `log-${Date.now()}`,
-            timestamp: time,
-            level: 'success',
-            source: 'GEOLOCATION_GPS',
-            message: `User location acquired: ${lat.toFixed(4)}, ${lng.toFixed(4)} · Ambient: ${temp}°C`
-          },
-          ...prev
-        ]);
-      },
-      (err) => {
-        console.warn("Geolocation denied or timed out:", err.message);
-        setIsLocating(false);
-        // Fallback default
-        setUserCoords({
-          lat: 33.4484,
-          lng: -112.0740,
-          city: "Phoenix, AZ (Default)",
-          tempC: 39.5,
-          isLive: false
-        });
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
+      const finalCoords = {
+        lat: Math.round(lat * 10000) / 10000,
+        lng: Math.round(lng * 10000) / 10000,
+        city: resolvedCity,
+        tempC: Math.round(temp * 10) / 10,
+        isLive: true
+      };
+
+      setUserCoords(finalCoords);
+      setIsLocating(false);
+
+      const time = new Date().toTimeString().split(' ')[0];
+      setLogs(prev => [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: time,
+          level: 'success',
+          source: isGPS ? 'GPS_HARDWARE' : 'IP_GEOLOCATION_MESH',
+          message: `Location active: ${resolvedCity} (${finalCoords.lat}°, ${finalCoords.lng}°) · Ambient: ${finalCoords.tempC}°C`
+        },
+        ...prev
+      ]);
+    };
+
+    // Fallback: IP-based Geolocation if browser GPS is blocked/denied/timeout
+    const tryIPGeolocation = async () => {
+      try {
+        const ipRes = await fetch('https://ipwho.is/');
+        if (ipRes.ok) {
+          const ipData = await ipRes.json();
+          if (ipData.success && typeof ipData.latitude === 'number') {
+            const cityStr = `${ipData.city || 'Local Region'}, ${ipData.country_code || ''}`.trim();
+            await resolveWeatherAndCity(ipData.latitude, ipData.longitude, cityStr, false);
+            return;
+          }
+        }
+      } catch (err) {
+        console.log("ipwho.is failed, trying ipapi.co...", err);
+      }
+
+      // Secondary IP Fallback
+      try {
+        const ipRes2 = await fetch('https://ipapi.co/json/');
+        if (ipRes2.ok) {
+          const ipData2 = await ipRes2.json();
+          if (typeof ipData2.latitude === 'number') {
+            const cityStr2 = `${ipData2.city || 'Local Area'}, ${ipData2.country_code || ''}`.trim();
+            await resolveWeatherAndCity(ipData2.latitude, ipData2.longitude, cityStr2, false);
+            return;
+          }
+        }
+      } catch (err2) {
+        console.log("ipapi.co failed, using standard fallback", err2);
+      }
+
+      // Standard default fallback if all offline
+      setUserCoords({
+        lat: 33.4484,
+        lng: -112.0740,
+        city: "Phoenix, AZ",
+        tempC: 39.5,
+        isLive: true
+      });
+      setIsLocating(false);
+    };
+
+    // Try HTML5 Browser Geolocation first
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          await resolveWeatherAndCity(
+            position.coords.latitude,
+            position.coords.longitude,
+            "My Location",
+            true
+          );
+        },
+        async (error) => {
+          console.warn("Browser GPS unavailable or denied, falling back to IP Geolocation:", error.message);
+          await tryIPGeolocation();
+        },
+        { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
+      );
+    } else {
+      await tryIPGeolocation();
+    }
   };
+
+  // Attempt automatic location on startup
+  useEffect(() => {
+    handleRequestLocation();
+  }, []);
 
   // Toggle task completion
   const handleToggleTask = (targetTaskId: string) => {

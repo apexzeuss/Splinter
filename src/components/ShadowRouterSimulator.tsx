@@ -86,10 +86,35 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
     return () => clearInterval(interval);
   }, [isPlaying]);
 
+  // Dynamic city presets including live user location if available
+  const availableCities = useMemo(() => {
+    if (userCoords?.isLive) {
+      const userPreset = {
+        id: 'my-location',
+        name: `📍 ${userCoords.city} (Live GPS)`,
+        latitude: userCoords.lat,
+        longitude: userCoords.lng,
+        timezone: 'Local',
+        typicalSummerHighC: userCoords.tempC,
+        urbanHeatIslandPenaltyC: 4.8
+      };
+      return [userPreset, ...CITY_PRESETS];
+    }
+    return CITY_PRESETS;
+  }, [userCoords]);
+
+  // If userCoords becomes live, auto-select it and sync ambient temperature
+  useEffect(() => {
+    if (userCoords?.isLive) {
+      setSelectedCityId('my-location');
+      setBaseTemperature(userCoords.tempC);
+    }
+  }, [userCoords?.isLive, userCoords?.city, userCoords?.tempC]);
+
   // Active City Preset
   const currentCity = useMemo(() => {
-    return CITY_PRESETS.find(c => c.id === selectedCityId) || CITY_PRESETS[0];
-  }, [selectedCityId]);
+    return availableCities.find(c => c.id === selectedCityId) || availableCities[0];
+  }, [selectedCityId, availableCities]);
 
   // Compute solar position based on time of day and city latitude
   const { solarElevationDeg, solarAzimuthDeg, timeString, uvIndex } = useMemo(() => {
@@ -313,10 +338,17 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
             <MapPin className="w-4 h-4 text-blue-400" />
             <select
               value={selectedCityId}
-              onChange={(e) => setSelectedCityId(e.target.value)}
+              onChange={(e) => {
+                const newCityId = e.target.value;
+                setSelectedCityId(newCityId);
+                const found = availableCities.find(c => c.id === newCityId);
+                if (found) {
+                  setBaseTemperature(found.typicalSummerHighC);
+                }
+              }}
               className="bg-transparent text-xs text-zinc-100 font-semibold focus:outline-none cursor-pointer"
             >
-              {CITY_PRESETS.map(c => (
+              {availableCities.map(c => (
                 <option key={c.id} value={c.id} className="bg-zinc-900 text-zinc-200">
                   {c.name} ({c.typicalSummerHighC}°C)
                 </option>
