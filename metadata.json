@@ -1,0 +1,6 @@
+{
+  "name": "Splinter Workspace & Pipeline Console",
+  "description": "Intelligent pedestrian router that minimizes heat exposure by combining hyperlocal temperature data with real-time shade geometry.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
