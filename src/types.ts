@@ -1,3 +1,12 @@
+export interface UserCoords {
+  lat: number;
+  lng: number;
+  city: string;
+  tempC: number;
+  isLive: boolean;
+  source?: 'GPS' | 'IP' | 'MANUAL' | 'DEFAULT';
+}
+
 export type DocId = 'README.md' | 'project-plan.md' | 'prd.md' | 'architecture.md' | 'memory.md' | 'handoff.md';
 
 export interface ProjectDoc {

@@ -9,6 +9,7 @@ interface HomePageProps {
   onNavigateToRouter: () => void;
   userCoords: { lat: number; lng: number; city: string; tempC: number; isLive: boolean } | null;
   onRequestLocation: () => void;
+  onOpenLocationModal?: () => void;
   isLocating: boolean;
 }
 
@@ -16,6 +17,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   onNavigateToRouter,
   userCoords,
   onRequestLocation,
+  onOpenLocationModal,
   isLocating
 }) => {
   return (
@@ -65,12 +67,12 @@ export const HomePage: React.FC<HomePageProps> = ({
             </button>
 
             <button
-              onClick={onRequestLocation}
+              onClick={onOpenLocationModal || onRequestLocation}
               disabled={isLocating}
-              className="px-5 py-3.5 rounded-2xl bg-[#121216] border border-zinc-800 text-zinc-200 hover:text-white hover:border-zinc-700 font-semibold text-sm transition flex items-center gap-2"
+              className="px-5 py-3.5 rounded-2xl bg-[#121216] border border-zinc-800 text-zinc-200 hover:text-white hover:border-zinc-700 font-semibold text-sm transition flex items-center gap-2 cursor-pointer"
             >
-              <MapPin className={`w-4 h-4 ${isLocating ? 'text-amber-400 animate-spin' : 'text-blue-400'}`} />
-              <span>{userCoords?.isLive ? `GPS Active (${userCoords.city})` : isLocating ? 'Acquiring GPS...' : 'Use My Current Location'}</span>
+              <MapPin className={`w-4 h-4 ${isLocating ? 'text-amber-400 animate-spin' : userCoords?.isLive ? 'text-emerald-400' : 'text-blue-400'}`} />
+              <span>{userCoords?.isLive ? `📍 ${userCoords.city} (${userCoords.tempC}°C)` : isLocating ? 'Acquiring GPS...' : 'Set / Detect Location'}</span>
             </button>
           </div>
         </div>

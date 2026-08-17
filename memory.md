@@ -35,6 +35,11 @@
 - **Decision**: Created the dedicated `project-plan.md`, `prd.md`, `architecture.md`, `memory.md`, and `handoff.md` files at the project root and embedded a live interactive markdown viewer inside the app (`DocViewer.tsx` accessible via the Dev Console).
 - **Outcome**: Any AI coding agent or developer can immediately inspect system state, architecture, and current task progress directly from the repository files.
 
+### Decision 5: Universal Location Modal & Open-Meteo Geocoding Search
+- **Context**: Browser GPS can be blocked by adblockers, privacy policies, macOS location settings, or sandboxed iframes. Users need guaranteed ability to select their exact location either via GPS, interactive city search, hotspot presets, or custom coordinates.
+- **Decision**: Implemented `LocationModal.tsx` powered by Open-Meteo Geocoding API (`geocoding-api.open-meteo.com`) and Open-Meteo Weather API (`api.open-meteo.com`). This provides zero-key, CORS-safe, worldwide instant location searching and weather synchronizing.
+- **Outcome**: Users have 100% control over their microclimate coordinates anywhere in the world.
+
 ---
 
 ## 3. Session Change Log
@@ -42,3 +47,4 @@
 - **2026-08-17**: Integrated HTML5 GPS and IP geolocation fallback with Open-Meteo live weather data.
 - **2026-08-17**: Added dynamic city presets including `📍 My Location (Live GPS)`.
 - **2026-08-17**: Created root markdown files (`project-plan.md`, `prd.md`, `architecture.md`, `memory.md`, `handoff.md`) for cross-agent AI portability.
+- **2026-08-17**: Implemented interactive `LocationModal` with worldwide city search, 1-click GPS, preset heat hotspots, and custom coordinate inputs.

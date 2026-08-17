@@ -41,9 +41,10 @@ const SIDEWALK_NODES: { id: string; x: number; y: number; name: string }[] = [
 
 interface ShadowRouterSimulatorProps {
   userCoords?: { lat: number; lng: number; city: string; tempC: number; isLive: boolean } | null;
+  onOpenLocationModal?: () => void;
 }
 
-export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ userCoords }) => {
+export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ userCoords, onOpenLocationModal }) => {
   // Time of day in minutes from midnight (8:00 AM = 480, 6:00 PM = 1080)
   const [timeMinutes, setTimeMinutes] = useState<number>(15 * 60 + 45); // 15:45 (3:45 PM)
   const [baseTemperature, setBaseTemperature] = useState<number>(39.5);
@@ -333,7 +334,7 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
 
         {/* City & Solar Telemetry Badges */}
         <div className="flex flex-wrap items-center gap-2.5">
-          {/* City Selector */}
+          {/* City Selector & Location Button */}
           <div className="bg-[#121216] px-3.5 py-2 rounded-xl border border-zinc-800 flex items-center gap-2 shadow-sm">
             <MapPin className="w-4 h-4 text-blue-400" />
             <select
@@ -354,6 +355,15 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
                 </option>
               ))}
             </select>
+            {onOpenLocationModal && (
+              <button
+                onClick={onOpenLocationModal}
+                title="Search city, detect GPS, or enter custom coordinates"
+                className="ml-1 text-[11px] font-semibold text-blue-400 hover:text-blue-300 bg-blue-500/10 hover:bg-blue-500/20 px-2 py-0.5 rounded-md border border-blue-500/30 transition cursor-pointer"
+              >
+                Change / GPS
+              </button>
+            )}
           </div>
 
           {/* Perspective View Toggle */}

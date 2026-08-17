@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { DocId, ProjectDoc, TaskItem, ArchitectureDirective, SplinterNode, LogEntry } from './types';
+import { DocId, ProjectDoc, TaskItem, ArchitectureDirective, SplinterNode, LogEntry, UserCoords } from './types';
 import { INITIAL_DOCS, INITIAL_TASKS, INITIAL_DIRECTIVES, INITIAL_NODES, INITIAL_LOGS } from './data/projectData';
 import { ModernHeader, AppNavPage } from './components/ModernHeader';
 import { HomePage } from './components/HomePage';
@@ -14,6 +14,7 @@ import { DocViewer } from './components/DocViewer';
 import { NodeRegistry } from './components/NodeRegistry';
 import { RagSandbox } from './components/RagSandbox';
 import { MemoryConsole } from './components/MemoryConsole';
+import { LocationModal } from './components/LocationModal';
 import { Footer } from './components/Footer';
 
 export default function App() {
@@ -27,15 +28,17 @@ export default function App() {
   const [lastSyncTime, setLastSyncTime] = useState<string>('2026-08-17 01:40:00');
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
+  const [isLocationModalOpen, setIsLocationModalOpen] = useState<boolean>(false);
 
   // Real Browser Geolocation State
-  const [userCoords, setUserCoords] = useState<{
-    lat: number;
-    lng: number;
-    city: string;
-    tempC: number;
-    isLive: boolean;
-  } | null>(null);
+  const [userCoords, setUserCoords] = useState<UserCoords | null>({
+    lat: 33.4484,
+    lng: -112.0740,
+    city: 'Phoenix, AZ',
+    tempC: 39.5,
+    isLive: true,
+    source: 'DEFAULT'
+  });
   const [isLocating, setIsLocating] = useState<boolean>(false);
 
   const taskId = 'e_6a809a7420ac8325a91c1e9b50cdb6ad';
@@ -249,7 +252,29 @@ export default function App() {
         onNavigate={setCurrentPage}
         userCoords={userCoords}
         onRequestLocation={handleRequestLocation}
+        onOpenLocationModal={() => setIsLocationModalOpen(true)}
         isLocating={isLocating}
+      />
+
+      {/* Location Selector / Search / GPS Modal */}
+      <LocationModal
+        isOpen={isLocationModalOpen}
+        onClose={() => setIsLocationModalOpen(false)}
+        userCoords={userCoords}
+        onSelectLocation={(newCoords) => {
+          setUserCoords(newCoords);
+          const time = new Date().toTimeString().split(' ')[0];
+          setLogs(prev => [
+            {
+              id: `log-${Date.now()}`,
+              timestamp: time,
+              level: 'success',
+              source: `LOCATION_${newCoords.source || 'MANUAL'}`,
+              message: `Active location updated: ${newCoords.city} (${newCoords.lat}°, ${newCoords.lng}°) · ${newCoords.tempC}°C`
+            },
+            ...prev
+          ]);
+        }}
       />
 
       {/* Main Page Routing Switcher */}
@@ -283,13 +308,17 @@ export default function App() {
               onNavigateToRouter={() => setCurrentPage('router')}
               userCoords={userCoords}
               onRequestLocation={handleRequestLocation}
+              onOpenLocationModal={() => setIsLocationModalOpen(true)}
               isLocating={isLocating}
             />
           )}
 
           {/* 2. Live 2.5D Router Simulator */}
           {currentPage === 'router' && (
-            <ShadowRouterSimulator userCoords={userCoords} />
+            <ShadowRouterSimulator
+              userCoords={userCoords}
+              onOpenLocationModal={() => setIsLocationModalOpen(true)}
+            />
           )}
 
           {/* 3. Urban Heat Island Analytics Page */}

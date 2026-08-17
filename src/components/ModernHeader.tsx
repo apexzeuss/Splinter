@@ -11,6 +11,7 @@ interface ModernHeaderProps {
   onNavigate: (page: AppNavPage) => void;
   userCoords: { lat: number; lng: number; city: string; tempC: number; isLive: boolean } | null;
   onRequestLocation: () => void;
+  onOpenLocationModal?: () => void;
   isLocating: boolean;
 }
 
@@ -19,6 +20,7 @@ export const ModernHeader: React.FC<ModernHeaderProps> = ({
   onNavigate,
   userCoords,
   onRequestLocation,
+  onOpenLocationModal,
   isLocating
 }) => {
   return (
@@ -125,19 +127,20 @@ export const ModernHeader: React.FC<ModernHeaderProps> = ({
       <div className="flex items-center gap-2.5">
         {/* Real Geolocation Button */}
         <button
-          onClick={onRequestLocation}
+          onClick={onOpenLocationModal || onRequestLocation}
           disabled={isLocating}
-          title="Detect my real device coordinates and temperature"
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition border ${
+          title="Click to detect GPS, search any city, or change microclimate"
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition border cursor-pointer ${
             userCoords?.isLive
-              ? 'bg-emerald-950/50 text-emerald-300 border-emerald-500/40'
+              ? 'bg-emerald-950/50 text-emerald-300 border-emerald-500/40 hover:bg-emerald-900/50'
               : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:border-zinc-700 hover:text-white'
           }`}
         >
           <MapPin className={`w-3.5 h-3.5 ${isLocating ? 'text-amber-400 animate-spin' : userCoords?.isLive ? 'text-emerald-400' : 'text-blue-400'}`} />
-          <span>
-            {isLocating ? 'Locating...' : userCoords?.isLive ? `${userCoords.city} (${userCoords.tempC}°C)` : 'Turn On Location'}
+          <span className="max-w-[140px] sm:max-w-none truncate">
+            {isLocating ? 'Locating...' : userCoords?.isLive ? `${userCoords.city} (${userCoords.tempC}°C)` : 'Set Location'}
           </span>
+          <span className="text-[10px] text-zinc-500 hidden sm:inline">▾</span>
         </button>
 
         {/* Developer Workspace Switcher for project artifacts */}
