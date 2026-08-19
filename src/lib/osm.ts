@@ -8,7 +8,7 @@
  * Overpass API: https://wiki.openstreetmap.org/wiki/Overpass_API
  */
 
-import { Pt } from './geometry';
+import { Pt, GeoAnchor } from './geometry';
 
 /** A building footprint fetched from OSM, with its vertices in pixels. */
 export interface OsmBuilding {
@@ -57,11 +57,20 @@ export async function fetchOsmData(bbox: [number, number, number, number]): Prom
 /**
  * (Placeholder) Parses raw Overpass JSON into an array of building objects.
  * This will be the next step to implement.
+ *
+ * @param osmData Raw Overpass API JSON response.
+ * @param anchor Projection origin used to convert lng/lat into canvas space.
+ * @param pxPerMeter Canvas scale, i.e. `1 / METERS_PER_PX`.
  */
-export function parseOsmBuildings(osmData: any): OsmBuilding[] {
+export function parseOsmBuildings(
+  osmData: any,
+  anchor: GeoAnchor,
+  pxPerMeter: number,
+): OsmBuilding[] {
   // TODO: Convert OSM nodes and ways into arrays of OsmBuilding objects.
   // This will involve mapping node IDs to their lat/lon coordinates and then
-  // assembling the ways (building outlines) from those nodes.
+  // assembling the ways (building outlines) from those nodes, projecting each
+  // vertex through `anchor` and scaling by `pxPerMeter`.
   console.log('Raw OSM data received, parsing not yet implemented:', osmData);
   return [];
 }
