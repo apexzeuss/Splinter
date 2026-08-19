@@ -32,11 +32,14 @@
    - **Mission & Research (`AboutMissionPage.tsx`)**: Scientific justification, thermal indices, and open data roadmap.
    - **Developer Console**: Embedded markdown documentation viewer (`DocViewer.tsx`), node registry, task manager, and real-time execution logs.
 
-3. **Geolocation & Real-Time Weather Integration**:
-   - 3-tier cascade geolocation: HTML5 GPS $\rightarrow$ `ipwho.is` $\rightarrow$ `ipapi.co` $\rightarrow$ Phoenix, AZ default fallback.
-   - Automatic reverse geocoding to retrieve human-readable city names via BigDataCloud API.
+3. **Universal Location & Real-Time Weather Integration**:
+   - Interactive `LocationModal.tsx` supporting:
+     - Instant global city search via Open-Meteo Geocoding API (`geocoding-api.open-meteo.com`).
+     - Device GPS queries with automatic multi-tier fallback (`ipwho.is` & `freeipapi.com`).
+     - 1-click popular heat hotspot presets (London, Austin, Phoenix, Dubai, Lagos, Tokyo, etc.).
+     - Custom latitude/longitude coordinate calibration.
    - Real-time ambient temperature (°C) and weather conditions via Open-Meteo API.
-   - Dynamic insertion of detected location into the simulator's city dropdown.
+   - Dynamic synchronization with the 2.5D Router Simulator (solar elevation, azimuth, and shadow raytracing).
 
 ---
 

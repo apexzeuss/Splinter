@@ -172,10 +172,26 @@ export const LocationModal: React.FC<LocationModalProps> = ({
             }
           }
         } catch (e) {
-          console.warn("IP Geolocation failed", e);
+          console.warn("IP Geolocation 1 failed", e);
         }
 
-        setStatusMessage('Unable to resolve GPS. Please search or pick a city from the list.');
+        // Secondary fallback: freeipapi.com
+        try {
+          const freeIpRes = await fetch('https://freeipapi.com/api/json');
+          if (freeIpRes.ok) {
+            const freeIpData = await freeIpRes.json();
+            if (typeof freeIpData.latitude === 'number') {
+              const name = `${freeIpData.cityName || 'Local Area'}, ${freeIpData.countryCode || ''}`;
+              await applyCoordinates(freeIpData.latitude, freeIpData.longitude, name, 'IP');
+              setIsLocatingGPS(false);
+              return;
+            }
+          }
+        } catch (e2) {
+          console.warn("freeipapi failed", e2);
+        }
+
+        setStatusMessage('GPS permission not available. Please use Search City or select a hotspot.');
         setIsLocatingGPS(false);
       },
       { enableHighAccuracy: true, timeout: 8000 }

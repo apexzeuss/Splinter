@@ -1,6 +1,6 @@
 {
-  "name": "Splinter Workspace & Pipeline Console",
-  "description": "Intelligent pedestrian router that minimizes heat exposure by combining hyperlocal temperature data with real-time shade geometry.",
+  "name": "CoolWalk: Real-Time Shade & Heat-Safe Pedestrian Router",
+  "description": "Real-world intelligent pedestrian navigation app that routes around direct sun exposure using live Open-Meteo weather, astronomical solar positioning, and real OpenStreetMap walking paths.",
   "requestFramePermissions": ["geolocation"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
