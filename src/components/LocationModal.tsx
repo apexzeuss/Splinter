@@ -76,36 +76,47 @@ export const LocationModal: React.FC<LocationModalProps> = ({
     }
   };
 
-  // Fetch live weather for selected coordinate
+  // Fetch live weather and the real UTC offset for the selected coordinate.
   const applyCoordinates = async (lat: number, lng: number, cityName: string, source: 'GPS' | 'IP' | 'MANUAL') => {
     setStatusMessage(`Fetching live weather for ${cityName}...`);
-    let temp = 30.0;
+    let temp: number | null = null;
+    let utcOffsetHours: number | undefined;
 
     try {
       const weatherRes = await fetch(
-        `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current_weather=true`
+        `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current_weather=true&timezone=auto`
       );
       if (weatherRes.ok) {
         const data = await weatherRes.json();
         if (data.current_weather && typeof data.current_weather.temperature === 'number') {
           temp = data.current_weather.temperature;
         }
+        // The solar calculation needs this to place solar noon correctly.
+        if (typeof data.utc_offset_seconds === 'number') {
+          utcOffsetHours = data.utc_offset_seconds / 3600;
+        }
       }
     } catch (e) {
-      console.warn("Weather lookup failed, using local estimate", e);
+      console.warn("Weather lookup failed", e);
     }
 
     const newCoords: UserCoords = {
       lat: Math.round(lat * 10000) / 10000,
       lng: Math.round(lng * 10000) / 10000,
       city: cityName,
-      tempC: Math.round(temp * 10) / 10,
+      // Keep the previous reading rather than substituting an invented 30.0 °C.
+      tempC: temp !== null ? Math.round(temp * 10) / 10 : (userCoords?.tempC ?? 30),
       isLive: true,
-      source
+      source,
+      utcOffsetHours
     };
 
     onSelectLocation(newCoords);
-    setStatusMessage(`Location updated to ${cityName} (${newCoords.tempC}°C)`);
+    setStatusMessage(
+      temp !== null
+        ? `Location set to ${cityName} (${newCoords.tempC}°C observed)`
+        : `Location set to ${cityName} — no weather reading, ambient unchanged`
+    );
     setTimeout(() => {
       onClose();
     }, 400);

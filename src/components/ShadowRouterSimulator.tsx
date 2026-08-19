@@ -1,15 +1,53 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { SAMPLE_BUILDINGS, SAMPLE_TREES, CITY_PRESETS, THERMAL_SCENARIOS, IOT_SENSOR_STATIONS } from '../data/projectData';
-import { 
-  Sun, Compass, Clock, Play, Pause, RotateCcw, ShieldAlert, Sparkles, 
-  Navigation, Thermometer, Layers, MapPin, Trees, Droplets, ArrowRight, 
-  Settings2, Sliders, Download, Radio, Check, Eye, ChevronRight, 
-  ShieldCheck, AlertTriangle, Wind, Info, Zap, Flame
+import { SAMPLE_BUILDINGS, SAMPLE_TREES, CITY_PRESETS, THERMAL_SCENARIOS } from '../data/projectData';
+import { OsmBuilding, fetchOsmData, parseOsmBuildings } from '../lib/osm';
+import {
+  Sun, Clock, Play, Pause, RotateCcw, Sparkles, Navigation, Thermometer,
+  Layers, MapPin, Trees, Settings2, Sliders, Download, Eye, AlertTriangle
 } from 'lucide-react';
-import { RouteStats, TurnInstruction, Waypoint } from '../types';
+import { RouteStats, CityPreset } from '../types';
+import {
+  solarPosition, clearSkyUvIndex, shadowLengthM, estimateUtcOffsetHours
+} from '../lib/solar';
+import { Pt, ShadeGeometry, convexHull, mToPx, canvasToLngLat, isShaded, METERS_PER_PX, GeoAnchor } from '../lib/geometry';
+import {
+  GraphNode, buildSidewalkEdges, weightEdges, distanceRoute, thermalRoute,
+  summarisePath, polylinePoints, effectiveTempC, DEFAULT_THERMAL_WEIGHTS
+} from '../lib/router';
+
+/**
+ * Typical street tree canopy height, used to cast the tree's own shadow.
+ * Previously tree shadows reused the first building's displacement vector, so
+ * their length tracked Atlas Tower's height rather than the tree's.
+ */
+const TREE_CANOPY_HEIGHT_M = 7;
+
+/**
+ * Scrubbable time-of-day window, 06:00 to 20:00.
+ * prd.md 4.1 and project-plan.md Phase 2 both specify this range; the slider was
+ * built to 08:00-18:00.
+ */
+const DAY_START_MIN = 6 * 60;
+const DAY_END_MIN = 20 * 60;
+
+/** Cell size of the thermal overlay grid, in canvas pixels. */
+const HEATMAP_CELL_PX = 17;
+
+/**
+ * Fixed points on the canvas that read out the model's computed temperature.
+ *
+ * These replace the "IoT Microclimate Sensor Stations" overlay, which rendered
+ * hardcoded values (45.2 C, 48.6 C, 1040 W/m2) as if they were live telemetry
+ * from a municipal sensor network.
+ */
+const PROBE_POINTS: { id: string; name: string; x: number; y: number }[] = [
+  { id: 'p1', name: 'Elm St mid-block', x: 180, y: 150 },
+  { id: 'p2', name: 'Oak Arcade', x: 240, y: 360 },
+  { id: 'p3', name: '5th Ave open asphalt', x: 760, y: 300 },
+];
 
 // Sidewalk intersection graph nodes for dynamic pathfinding
-const SIDEWALK_NODES: { id: string; x: number; y: number; name: string }[] = [
+const SIDEWALK_NODES: GraphNode[] = [
   // Avenue 1 (Y: 150)
   { id: 'n1', x: 80, y: 150, name: '1st Ave & Elm St (Metro Station)' },
   { id: 'n2', x: 240, y: 150, name: '2nd Ave & Elm St' },
@@ -39,8 +77,18 @@ const SIDEWALK_NODES: { id: string; x: number; y: number; name: string }[] = [
   { id: 'n20', x: 760, y: 460, name: '5th Ave & South Plaza (Medical District)' }
 ];
 
+/** Orthogonal grid connectivity. Static, so it is built once at module load. */
+const SIDEWALK_EDGES = buildSidewalkEdges(SIDEWALK_NODES);
+
 interface ShadowRouterSimulatorProps {
-  userCoords?: { lat: number; lng: number; city: string; tempC: number; isLive: boolean } | null;
+  userCoords?: {
+    lat: number;
+    lng: number;
+    city: string;
+    tempC: number;
+    isLive: boolean;
+    utcOffsetHours?: number;
+  } | null;
   onOpenLocationModal?: () => void;
 }
 
@@ -54,9 +102,12 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [showTrees, setShowTrees] = useState<boolean>(true);
   const [selectedBuildingId, setSelectedBuildingId] = useState<string | null>(null);
-  const [hoveredBuilding, setHoveredBuilding] = useState<any | null>(null);
   const [viewPerspective, setViewPerspective] = useState<'map' | 'street'>('map');
-  const [activeStepIndex, setActiveStepIndex] = useState<number>(0);
+
+  // Real-world building data state
+  const [osmBuildings, setOsmBuildings] = useState<OsmBuilding[]>([]);
+  const [isLoadingOsm, setIsLoadingOsm] = useState<boolean>(false);
+  const [osmError, setOsmError] = useState<string | null>(null);
 
   const [buildingHeights, setBuildingHeights] = useState<Record<string, number>>(() => {
     const initial: Record<string, number> = {};
@@ -75,231 +126,291 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
 
   // Auto-play time slider loop
   useEffect(() => {
-    let interval: any;
-    if (isPlaying) {
-      interval = setInterval(() => {
-        setTimeMinutes(prev => {
-          if (prev >= 18 * 60) return 8 * 60; // loop back to 8:00 AM
-          return prev + 5; // +5 mins per tick
-        });
-      }, 180);
-    }
+    if (!isPlaying) return;
+    const interval = setInterval(() => {
+      setTimeMinutes(prev => (prev >= DAY_END_MIN ? DAY_START_MIN : prev + 5));
+    }, 180);
     return () => clearInterval(interval);
   }, [isPlaying]);
 
-  // Dynamic city presets including live user location if available
-  const availableCities = useMemo(() => {
+  // Dynamic city presets including the user's location if one is set
+  const availableCities = useMemo<CityPreset[]>(() => {
     if (userCoords?.isLive) {
-      const userPreset = {
+      const userPreset: CityPreset = {
         id: 'my-location',
-        name: `📍 ${userCoords.city} (Live GPS)`,
+        name: `${userCoords.city} (your location)`,
         latitude: userCoords.lat,
         longitude: userCoords.lng,
         timezone: 'Local',
         typicalSummerHighC: userCoords.tempC,
-        urbanHeatIslandPenaltyC: 4.8
+        utcOffsetHours: userCoords.utcOffsetHours,
+        // No urbanHeatIslandPenaltyC: we have no UHI figure for an arbitrary
+        // coordinate, and the previous hardcoded 4.8 was invented.
       };
       return [userPreset, ...CITY_PRESETS];
     }
     return CITY_PRESETS;
   }, [userCoords]);
 
-  // If userCoords becomes live, auto-select it and sync ambient temperature
+  // Select the user's location once when it first arrives, and seed the ambient
+  // slider from its observed temperature.
+  //
+  // This deliberately keys on identity rather than on tempC: the previous
+  // version re-ran on every temperature change and force-set selectedCityId back
+  // to 'my-location', so a weather refresh silently discarded whichever city and
+  // ambient temperature the user had chosen.
+  const appliedLocationRef = React.useRef<string | null>(null);
   useEffect(() => {
-    if (userCoords?.isLive) {
-      setSelectedCityId('my-location');
-      setBaseTemperature(userCoords.tempC);
-    }
-  }, [userCoords?.isLive, userCoords?.city, userCoords?.tempC]);
+    if (!userCoords?.isLive) return;
+    const key = `${userCoords.lat},${userCoords.lng}`;
+    if (appliedLocationRef.current === key) return;
+    appliedLocationRef.current = key;
+    setSelectedCityId('my-location');
+    setBaseTemperature(userCoords.tempC);
+  }, [userCoords?.isLive, userCoords?.lat, userCoords?.lng, userCoords?.tempC]);
 
   // Active City Preset
   const currentCity = useMemo(() => {
     return availableCities.find(c => c.id === selectedCityId) || availableCities[0];
   }, [selectedCityId, availableCities]);
 
-  // Compute solar position based on time of day and city latitude
-  const { solarElevationDeg, solarAzimuthDeg, timeString, uvIndex } = useMemo(() => {
-    const hours = Math.floor(timeMinutes / 60);
-    const mins = timeMinutes % 60;
-    const timeStr = `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+  // Geo-anchor for projecting OSM coordinates to canvas pixels.
+  const geoAnchor = useMemo<GeoAnchor>(() => ({
+    latitude: currentCity.latitude,
+    longitude: currentCity.longitude,
+    originPx: { x: 425, y: 275 }, // Center of the canvas
+  }), [currentCity.latitude, currentCity.longitude]);
 
-    // Solar noon is ~13:00 (780 mins)
-    const solarFraction = (timeMinutes - 8 * 60) / (10 * 60); // 0 at 8 AM, 1 at 6 PM
-    const noonDeltaHours = (timeMinutes - 13 * 60) / 60;
+  // Fetch real building data when the city changes.
+  useEffect(() => {
+    const fetchAndSetOsmData = async () => {
+      setIsLoadingOsm(true);
+      setOsmError(null);
+      setOsmBuildings([]); // Clear previous buildings
 
-    // Solar elevation calculation based on latitude
-    const maxElevation = Math.min(88, 90 - Math.abs(currentCity.latitude - 23.44));
-    const elevation = Math.max(8, maxElevation - Math.pow(noonDeltaHours, 2) * 2.8);
+      // Bounding box of ~1.2km square around the city center.
+      const radiusDeg = 0.006;
+      const bbox: [number, number, number, number] = [
+        currentCity.longitude - radiusDeg,
+        currentCity.latitude - radiusDeg,
+        currentCity.longitude + radiusDeg,
+        currentCity.latitude + radiusDeg,
+      ];
 
-    // Solar azimuth: ~95° East in morning, 180° South at solar noon, ~265° West in evening
-    const azimuth = 95 + solarFraction * (265 - 95);
-
-    // UV Index calculation correlated with solar elevation
-    const uv = Math.max(1, Math.round((elevation / 90) * 11.5 * 10) / 10);
-
-    return {
-      solarElevationDeg: Math.round(elevation * 10) / 10,
-      solarAzimuthDeg: Math.round(azimuth * 10) / 10,
-      timeString: timeStr,
-      uvIndex: uv
+      try {
+        const rawData = await fetchOsmData(bbox);
+        const buildings = parseOsmBuildings(rawData, geoAnchor, 1 / METERS_PER_PX);
+        setOsmBuildings(buildings);
+      } catch (error) {
+        console.error("Failed to fetch or parse OSM data:", error);
+        setOsmError(error instanceof Error ? error.message : 'An unknown error occurred.');
+      } finally {
+        setIsLoadingOsm(false);
+      }
     };
-  }, [timeMinutes, currentCity]);
 
-  // Compute 2D & 2.5D shadow polygons for each building
+    fetchAndSetOsmData();
+  }, [currentCity, geoAnchor]);
+
+
+  // Date drives declination and the equation of time. Time-of-day scrubbing
+  // moves within this date.
+  const today = useMemo(() => new Date(), []);
+
+  const utcOffsetHours =
+    currentCity.utcOffsetHours ?? estimateUtcOffsetHours(currentCity.longitude);
+
+  // Real solar position (NOAA algorithm, see lib/solar.ts).
+  const solar = useMemo(
+    () =>
+      solarPosition({
+        latitude: currentCity.latitude,
+        longitude: currentCity.longitude,
+        minutesOfDay: timeMinutes,
+        date: today,
+        utcOffsetHours,
+      }),
+    [currentCity.latitude, currentCity.longitude, timeMinutes, today, utcOffsetHours],
+  );
+
+  const solarElevationDeg = Math.round(solar.elevationDeg * 10) / 10;
+  const solarAzimuthDeg = Math.round(solar.azimuthDeg * 10) / 10;
+  const uvIndexEstimate = Math.round(clearSkyUvIndex(solar.elevationDeg) * 10) / 10;
+  const isDaylight = solar.elevationDeg > 0.5;
+
+  const timeString = `${Math.floor(timeMinutes / 60)
+    .toString()
+    .padStart(2, '0')}:${(timeMinutes % 60).toString().padStart(2, '0')}`;
+
+
+  // Anti-solar displacement in canvas pixels, shared by buildings and trees.
+  const shadowVector = useMemo(() => {
+    if (!isDaylight) return null;
+    const antiSolarRad = ((solar.azimuthDeg + 180) % 360) * (Math.PI / 180);
+    return { sin: Math.sin(antiSolarRad), cos: Math.cos(antiSolarRad) };
+  }, [solar.azimuthDeg, isDaylight]);
+
+  // Building shadow polygons: convex hull of footprint and its projection, per
+  // architecture.md section 2.4. Lengths go through METERS_PER_PX so the map has
+  // one scale rather than 1.4 for routes and 0.82 for shadows.
   const shadowPolygons = useMemo(() => {
-    const antiSolarAzimuthRad = ((solarAzimuthDeg + 180) % 360) * (Math.PI / 180);
-    const elevationRad = (solarElevationDeg * Math.PI) / 180;
-    const scale = 0.82;
+    if (!shadowVector) return [];
 
-    return SAMPLE_BUILDINGS.map(b => {
-      const height = buildingHeights[b.id] || b.buildingHeightM;
-      const shadowLengthPx = (height / Math.tan(elevationRad)) * scale;
-      const dx = Math.sin(antiSolarAzimuthRad) * shadowLengthPx;
-      const dy = -Math.cos(antiSolarAzimuthRad) * shadowLengthPx;
+    return osmBuildings.flatMap((b) => {
+      // Use OSM height if available, otherwise a fallback.
+      // TODO: Improve this fallback strategy.
+      const heightM = b.heightM ?? buildingHeights[b.id] ?? 25;
+      const lengthM = shadowLengthM(heightM, solar.elevationDeg);
+      if (lengthM === null) return [];
 
-      const p1 = { x: b.x, y: b.y };
-      const p2 = { x: b.x + b.width, y: b.y };
-      const p3 = { x: b.x + b.width, y: b.y + b.height };
-      const p4 = { x: b.x, y: b.y + b.height };
+      const lengthPx = mToPx(lengthM);
+      const dx = shadowVector.sin * lengthPx;
+      const dy = -shadowVector.cos * lengthPx;
+      const projected = b.footprint.map((p) => ({ x: p.x + dx, y: p.y + dy }));
 
-      const s1 = { x: p1.x + dx, y: p1.y + dy };
-      const s2 = { x: p2.x + dx, y: p2.y + dy };
-      const s3 = { x: p3.x + dx, y: p3.y + dy };
-      const s4 = { x: p4.x + dx, y: p4.y + dy };
-
-      return {
+      return [{
         buildingId: b.id,
-        footprint: [p1, p2, p3, p4],
-        shadowExtrusion: [p1, p2, s2, s3, s4, p4],
-        shadowLengthM: Math.round(height / Math.tan(elevationRad)),
+        footprint: b.footprint,
+        hull: convexHull([...b.footprint, ...projected]),
+        shadowLengthM: Math.round(lengthM),
         dx,
-        dy
-      };
+        dy,
+      }];
     });
-  }, [solarElevationDeg, solarAzimuthDeg, buildingHeights]);
+  }, [shadowVector, solar.elevationDeg, buildingHeights]);
+
+  // Tree canopy shadows, cast from the tree's own height. (Still using sample trees)
+  const treeShadows = useMemo(() => {
+    if (!shadowVector || !showTrees) return [];
+    const lengthM = shadowLengthM(TREE_CANOPY_HEIGHT_M, solar.elevationDeg);
+    if (lengthM === null) return [];
+
+    const lengthPx = mToPx(lengthM);
+    const dx = shadowVector.sin * lengthPx;
+    const dy = -shadowVector.cos * lengthPx;
+
+    return customTrees.map((t) => ({
+      id: t.id,
+      x: t.x + dx,
+      y: t.y + dy,
+      r: t.radius * 1.15,
+    }));
+  }, [shadowVector, solar.elevationDeg, showTrees, customTrees]);
+
+  // Everything the router treats as shade.
+  const shadeGeometry = useMemo<ShadeGeometry>(
+    () => ({
+      polygons: shadowPolygons.map((s) => s.hull),
+      circles: treeShadows.map((t) => ({ x: t.x, y: t.y, r: t.r })),
+    }),
+    [shadowPolygons, treeShadows],
+  );
+
 
   const startNode = useMemo(() => SIDEWALK_NODES.find(n => n.id === startNodeId) || SIDEWALK_NODES[0], [startNodeId]);
   const endNode = useMemo(() => SIDEWALK_NODES.find(n => n.id === endNodeId) || SIDEWALK_NODES[19], [endNodeId]);
 
-  // Dynamic Route Calculations
-  const directPathPoints = useMemo(() => {
-    return `${startNode.x},${startNode.y} ${endNode.x},${startNode.y} ${endNode.x},${endNode.y}`;
-  }, [startNode, endNode]);
+  // Measure every sidewalk edge against the shadows currently on the canvas.
+  const edges = useMemo(
+    () => weightEdges(SIDEWALK_NODES, SIDEWALK_EDGES, shadeGeometry),
+    [shadeGeometry],
+  );
 
-  // Cool path snakes through the shaded building alleys based on solar angle
-  const { coolPathPoints, coolPathNodes } = useMemo(() => {
-    if (solarAzimuthDeg > 180) {
-      // Afternoon sun from West -> East alleys (Pine & Oak arcades) are heavily shaded
-      const intermediate1 = { x: startNode.x, y: 210, name: 'Pine Colonnade West' };
-      const intermediate2 = { x: 240, y: 210, name: 'Atlas Arcade Crossway' };
-      const intermediate3 = { x: 240, y: 360, name: 'Horizon Shade Tunnel' };
-      const intermediate4 = { x: 410, y: 360, name: 'Desert Willow Walkway' };
-      const intermediate5 = { x: 410, y: endNode.y, name: 'Solaris East Covered Portal' };
-      return {
-        coolPathPoints: `${startNode.x},${startNode.y} ${intermediate1.x},${intermediate1.y} ${intermediate2.x},${intermediate2.y} ${intermediate3.x},${intermediate3.y} ${intermediate4.x},${intermediate4.y} ${intermediate5.x},${intermediate5.y} ${endNode.x},${endNode.y}`,
-        coolPathNodes: [startNode, intermediate1, intermediate2, intermediate3, intermediate4, intermediate5, endNode]
-      };
-    } else {
-      // Morning sun from East -> West alleys are shaded
-      const intermediate1 = { x: startNode.x, y: 360, name: 'Oak Arcade North' };
-      const intermediate2 = { x: 240, y: 360, name: 'Sycamore Tree Buffer' };
-      const intermediate3 = { x: 240, y: 210, name: 'Pine Shaded Colonnade' };
-      const intermediate4 = { x: 590, y: 210, name: 'Civic Center Shadow Corridor' };
-      const intermediate5 = { x: 590, y: endNode.y, name: 'Medical District South Way' };
-      return {
-        coolPathPoints: `${startNode.x},${startNode.y} ${intermediate1.x},${intermediate1.y} ${intermediate2.x},${intermediate2.y} ${intermediate3.x},${intermediate3.y} ${intermediate4.x},${intermediate4.y} ${intermediate5.x},${intermediate5.y} ${endNode.x},${endNode.y}`,
-        coolPathNodes: [startNode, intermediate1, intermediate2, intermediate3, intermediate4, intermediate5, endNode]
-      };
+  // Two searches over the same graph: one minimising distance, one minimising
+  // the thermal cost from architecture.md section 2.4. Both respect the A and B
+  // waypoints, which the previous hardcoded polylines did not.
+  const directPath = useMemo(
+    () => distanceRoute(SIDEWALK_NODES, edges, startNodeId, endNodeId),
+    [edges, startNodeId, endNodeId],
+  );
+
+  const coolPath = useMemo(
+    () => thermalRoute(SIDEWALK_NODES, edges, startNodeId, endNodeId, baseTemperature),
+    [edges, startNodeId, endNodeId, baseTemperature],
+  );
+
+  const directPathPoints = useMemo(() => polylinePoints(directPath), [directPath]);
+  const coolPathPoints = useMemo(() => polylinePoints(coolPath), [coolPath]);
+
+  /** True when the thermal objective found nothing better than the direct path. */
+  const routesIdentical = useMemo(
+    () =>
+      directPath.length === coolPath.length &&
+      directPath.every((n, i) => n.id === coolPath[i].id),
+    [directPath, coolPath],
+  );
+
+
+  // Route statistics, measured from the graph and the current shadow geometry.
+  const conditions = useMemo(
+    () => ({
+      ambientC: baseTemperature,
+      solarElevationDeg: solar.elevationDeg,
+      uvIndexEstimate,
+    }),
+    [baseTemperature, solar.elevationDeg, uvIndexEstimate],
+  );
+
+  const baselineStats: RouteStats = useMemo(
+    () => summarisePath(directPath, edges, conditions),
+    [directPath, edges, conditions],
+  );
+
+  const coolRouteStats: RouteStats = useMemo(
+    () => summarisePath(coolPath, edges, conditions),
+    [coolPath, edges, conditions],
+  );
+
+  const shadeGainPct = coolRouteStats.shadeCoveragePercent - baselineStats.shadeCoveragePercent;
+  const tempReliefC = baselineStats.effectiveTempC - coolRouteStats.effectiveTempC;
+  const distancePenaltyM = coolRouteStats.distanceMeters - baselineStats.distanceMeters;
+  const timePenaltyMin =
+    Math.round((coolRouteStats.walkingTimeMin - baselineStats.walkingTimeMin) * 10) / 10;
+
+  // Union area of the tree shadows, measured by sampling so that overlapping
+  // canopies are not counted twice. The previous figure was
+  // `trees * pi * 16 * 16 * 0.42`, which assumed a fixed radius and ignored both
+  // the real radii and the sun angle.
+  const canopyShadeAreaM2 = useMemo(() => {
+    if (treeShadows.length === 0) return 0;
+    const step = 3;
+    let cells = 0;
+    for (let x = 0; x < 850; x += step) {
+      for (let y = 0; y < 550; y += step) {
+        const covered = treeShadows.some(
+          (s) => (x - s.x) ** 2 + (y - s.y) ** 2 <= s.r * s.r,
+        );
+        if (covered) cells++;
+      }
     }
-  }, [startNode, endNode, solarAzimuthDeg]);
+    return Math.round(cells * step * step * METERS_PER_PX * METERS_PER_PX);
+  }, [treeShadows]);
 
-  // Calculate dynamic statistics
-  const directDistanceM = Math.round(Math.abs(endNode.x - startNode.x) * 1.4 + Math.abs(endNode.y - startNode.y) * 1.4);
-  const coolDistanceM = Math.round(directDistanceM * 1.18);
-
-  const baselineStats: RouteStats = useMemo(() => {
-    const shadePct = Math.max(12, Math.round(24 - (solarElevationDeg / 90) * 12));
-    const meanRadTemp = baseTemperature + 15.2 * (1 - shadePct / 100);
-    const perceived = baseTemperature + 6.8 * (1 - shadePct / 100);
-    const sweatLoss = Math.round((perceived / 30) * 480);
-
-    const steps: TurnInstruction[] = [
-      {
-        id: 's1',
-        instruction: `Depart from ${startNode.name} heading East on unshaded Elm Boulevard`,
-        distanceMeters: Math.round(Math.abs(endNode.x - startNode.x) * 1.4),
-        shadePercent: shadePct,
-        tempC: Math.round(perceived * 10) / 10,
-        landmark: 'Direct wide open unshaded concrete boulevard'
-      },
-      {
-        id: 's2',
-        instruction: `Turn South onto 5th Ave directly toward ${endNode.name}`,
-        distanceMeters: Math.round(Math.abs(endNode.y - startNode.y) * 1.4),
-        shadePercent: shadePct + 4,
-        tempC: Math.round(perceived * 10) / 10,
-        landmark: 'High asphalt thermal radiant canyon'
+  // Coarse grid of computed effective temperature for the thermal overlay.
+  const thermalCells = useMemo(() => {
+    if (!showThermalHeatmap) return [];
+    const cells: { x: number; y: number; tempC: number }[] = [];
+    for (let x = 0; x < 850; x += HEATMAP_CELL_PX) {
+      for (let y = 0; y < 550; y += HEATMAP_CELL_PX) {
+        const centre = { x: x + HEATMAP_CELL_PX / 2, y: y + HEATMAP_CELL_PX / 2 };
+        const coverage = isShaded(centre, shadeGeometry) ? 1 : 0;
+        cells.push({
+          x,
+          y,
+          tempC: effectiveTempC(baseTemperature, coverage, solar.elevationDeg),
+        });
       }
-    ];
+    }
+    return cells;
+  }, [showThermalHeatmap, shadeGeometry, baseTemperature, solar.elevationDeg]);
 
-    return {
-      distanceMeters: directDistanceM,
-      walkingTimeMin: Math.round((directDistanceM / 80) * 10) / 10,
-      shadeCoveragePercent: shadePct,
-      meanRadiantTempC: Math.round(meanRadTemp * 10) / 10,
-      perceivedTempC: Math.round(perceived * 10) / 10,
-      thermalDiscomfortIndex: 8.9,
-      uvIndex,
-      estimatedSweatLossMl: sweatLoss,
-      steps
-    };
-  }, [baseTemperature, solarElevationDeg, directDistanceM, startNode, endNode, uvIndex]);
+  /** Colour scale bounds: fully shaded through fully exposed. */
+  const heatRange = useMemo(() => {
+    const lo = baseTemperature;
+    const hi = effectiveTempC(baseTemperature, 0, solar.elevationDeg);
+    return { lo, hi: Math.max(hi, lo + 0.1) };
+  }, [baseTemperature, solar.elevationDeg]);
 
-  const coolRouteStats: RouteStats = useMemo(() => {
-    const shadePct = Math.min(96, Math.round(74 + (90 - solarElevationDeg) * 0.24 + (showTrees ? 8 : 0)));
-    const meanRadTemp = baseTemperature + 15.2 * (1 - shadePct / 100);
-    const perceived = baseTemperature + 6.8 * (1 - shadePct / 100) - 3.4;
-    const sweatLoss = Math.round((perceived / 30) * 210);
-
-    const steps: TurnInstruction[] = [
-      {
-        id: 'c1',
-        instruction: `Depart from ${startNode.name}, step directly into Pine Colonnade shaded arcade`,
-        distanceMeters: 180,
-        shadePercent: 92,
-        tempC: Math.round((perceived - 0.6) * 10) / 10,
-        landmark: 'Atlas Tower shadow arcade canopy'
-      },
-      {
-        id: 'c2',
-        instruction: `Follow tree-lined arcade past Horizon Plaza & Sycamore canopy buffer`,
-        distanceMeters: 340,
-        shadePercent: 94,
-        tempC: Math.round((perceived - 1.4) * 10) / 10,
-        landmark: 'Desert Willow tree cooling corridor'
-      },
-      {
-        id: 'c3',
-        instruction: `Turn along Solaris Center eastern covered passage directly into ${endNode.name}`,
-        distanceMeters: 420,
-        shadePercent: 88,
-        tempC: Math.round(perceived * 10) / 10,
-        landmark: 'Deep building shadow relief portal'
-      }
-    ];
-
-    return {
-      distanceMeters: coolDistanceM,
-      walkingTimeMin: Math.round((coolDistanceM / 80) * 10) / 10,
-      shadeCoveragePercent: shadePct,
-      meanRadiantTempC: Math.round(meanRadTemp * 10) / 10,
-      perceivedTempC: Math.round(perceived * 10) / 10,
-      thermalDiscomfortIndex: 3.1,
-      uvIndex: Math.max(1, Math.round(uvIndex * 0.22 * 10) / 10),
-      estimatedSweatLossMl: sweatLoss,
-      steps
-    };
-  }, [baseTemperature, solarElevationDeg, coolDistanceM, showTrees, startNode, endNode, uvIndex]);
 
   // Handle node selection for waypoints
   const handleNodeClick = (nodeId: string) => {
@@ -313,29 +424,26 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-[#070709] p-4 sm:p-6 lg:p-8 overflow-y-auto min-h-0 select-none">
+    <div className="flex-1 flex flex-col bg-white p-4 sm:p-6 lg:p-8 overflow-y-auto min-h-0 select-none">
       {/* Top Header & Telemetry Bar */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
         <div>
           <div className="text-blue-400 text-xs font-mono mb-1.5 uppercase tracking-wide flex items-center gap-2 font-semibold">
             <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
-            Urban Microclimate & Hyperlocal Shadow Mesh
+            Live 2.5D Router
           </div>
-          <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight flex items-center gap-3">
+          <h2 className="text-2xl sm:text-3xl font-extrabold text-zinc-900 tracking-tight">
             Splinter GIS Digital Twin
-            <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono font-medium">
-              v2.5D Isometric
-            </span>
           </h2>
-          <p className="text-zinc-400 mt-1 max-w-2xl text-xs sm:text-sm leading-relaxed">
-            Real-time raytraced building shadows, urban tree canopies, and microclimate heat exposure modeling for physiological pedestrian comfort.
+          <p className="text-zinc-500 mt-1 max-w-2xl text-xs sm:text-sm leading-relaxed">
+            Real-time raytraced building shadows and microclimate heat exposure modeling.
           </p>
         </div>
 
         {/* City & Solar Telemetry Badges */}
         <div className="flex flex-wrap items-center gap-2.5">
           {/* City Selector & Location Button */}
-          <div className="bg-[#121216] px-3.5 py-2 rounded-xl border border-zinc-800 flex items-center gap-2 shadow-sm">
+          <div className="bg-zinc-100 px-3.5 py-2 rounded-xl border border-zinc-200 flex items-center gap-2 shadow-sm">
             <MapPin className="w-4 h-4 text-blue-400" />
             <select
               value={selectedCityId}
@@ -347,10 +455,10 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
                   setBaseTemperature(found.typicalSummerHighC);
                 }
               }}
-              className="bg-transparent text-xs text-zinc-100 font-semibold focus:outline-none cursor-pointer"
+              className="bg-transparent text-xs text-zinc-800 font-semibold focus:outline-none cursor-pointer"
             >
               {availableCities.map(c => (
-                <option key={c.id} value={c.id} className="bg-zinc-900 text-zinc-200">
+                <option key={c.id} value={c.id} className="bg-white text-zinc-800">
                   {c.name} ({c.typicalSummerHighC}°C)
                 </option>
               ))}
@@ -367,11 +475,11 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
           </div>
 
           {/* Perspective View Toggle */}
-          <div className="flex items-center bg-[#121216] p-1 rounded-xl border border-zinc-800">
+          <div className="flex items-center bg-zinc-100 p-1 rounded-xl border border-zinc-200">
             <button
               onClick={() => setViewPerspective('map')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                viewPerspective === 'map' ? 'bg-blue-600 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+                viewPerspective === 'map' ? 'bg-blue-500 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-800'
               }`}
             >
               <Layers className="w-3.5 h-3.5" />
@@ -380,7 +488,7 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
             <button
               onClick={() => setViewPerspective('street')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                viewPerspective === 'street' ? 'bg-blue-600 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+                viewPerspective === 'street' ? 'bg-blue-500 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-800'
               }`}
             >
               <Eye className="w-3.5 h-3.5" />
@@ -389,18 +497,48 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
           </div>
 
           {/* Solar Coordinates Telemetry Pill */}
-          <div className="flex items-center gap-3 bg-[#121216] px-3.5 py-2 rounded-xl border border-zinc-800 shadow-sm">
+          <div className="flex items-center gap-3 bg-zinc-100 px-3.5 py-2 rounded-xl border border-zinc-200 shadow-sm">
             <Sun className="w-4 h-4 text-amber-400" />
-            <div className="font-mono text-xs text-zinc-300 font-semibold flex items-center gap-2">
+            <div
+              className="font-mono text-xs text-zinc-300 font-semibold flex items-center gap-2"
+              title={`Solar noon at ${currentCity.name} on ${today.toISOString().slice(0, 10)}. UV is a clear-sky estimate, not a measurement.`}
+            >
               <span>Az: <strong className="text-amber-400">{solarAzimuthDeg}°</strong></span>
               <span className="text-zinc-600">•</span>
-              <span>Alt: <strong className="text-blue-400">{solarElevationDeg}°</strong></span>
+              <span>Alt: <strong className="text-blue-500">{solarElevationDeg}°</strong></span>
               <span className="text-zinc-600">•</span>
-              <span>UV: <strong className={uvIndex > 7 ? 'text-rose-400' : 'text-emerald-400'}>{uvIndex}</strong></span>
+              <span>
+                UV est:{' '}
+                <strong className={uvIndexEstimate > 7 ? 'text-rose-400' : 'text-emerald-400'}>
+                  {uvIndexEstimate}
+                </strong>
+              </span>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Simulation disclosure. The street grid, buildings and trees are invented;
+          only the solar geometry and the routing over that grid are computed. */}
+      {osmError ? (
+        <div className="mb-5 flex items-start gap-2.5 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+          <div>
+            <strong className="text-rose-300">Map Data Error.</strong>
+            <p className="text-xs leading-relaxed text-zinc-300">
+              Could not load building data from OpenStreetMap. The service may be temporarily unavailable.
+              <span className="mt-1 block font-mono text-rose-400/60 text-[10px]">{osmError}</span>
+            </p>
+          </div>
+        </div>
+      ) : (
+        <div className="mb-5 flex items-start gap-2.5 rounded-xl border border-amber-500/25 bg-amber-500/5 px-4 py-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+          <p className="text-xs leading-relaxed text-zinc-300">
+            <strong className="text-amber-300">Live Building Data.</strong> Building footprints are from OpenStreetMap. The sidewalk intersections and trees are still a synthetic grid for routing demonstration.
+          </p>
+        </div>
+      )}
 
       {/* Quick Scenario Presets Strip */}
       <div className="flex flex-wrap items-center justify-between gap-2.5 mb-5 bg-[#121216]/80 p-3 rounded-2xl border border-zinc-800/80 backdrop-blur">
@@ -426,40 +564,52 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
 
         <button
           onClick={() => {
+            // Georeference the synthetic grid against the selected city so the
+            // file is valid GeoJSON. Previously this wrote raw SVG pixel pairs
+            // into `coordinates`, which no GIS tool could read.
+            const anchor = {
+              latitude: currentCity.latitude,
+              longitude: currentCity.longitude,
+              originPx: { x: 425, y: 275 },
+            };
+            const toFeature = (path: typeof directPath, name: string, stats: RouteStats) => ({
+              type: 'Feature' as const,
+              properties: { name, ...stats },
+              geometry: {
+                type: 'LineString' as const,
+                coordinates: path.map((n) => canvasToLngLat(n, anchor)),
+              },
+            });
+
             const exportData = {
-              type: "FeatureCollection",
+              type: 'FeatureCollection' as const,
               metadata: {
+                note:
+                  'Synthetic street grid from the Splinter simulator, georeferenced to the selected city. Not real map data.',
                 city: currentCity.name,
+                localTime: timeString,
+                date: today.toISOString().slice(0, 10),
                 solarAzimuthDeg,
                 solarElevationDeg,
-                perceivedTempDropC: (baselineStats.perceivedTempC - coolRouteStats.perceivedTempC).toFixed(1),
-                shadeCoveragePct: coolRouteStats.shadeCoveragePercent
+                ambientC: baseTemperature,
+                metersPerPixel: METERS_PER_PX,
+                thermalWeights: DEFAULT_THERMAL_WEIGHTS,
               },
               features: [
-                {
-                  type: "Feature",
-                  properties: { name: "Splinter Cool Route", stats: coolRouteStats },
-                  geometry: {
-                    type: "LineString",
-                    coordinates: coolPathNodes.map((n: any) => [n.x, n.y])
-                  }
-                },
-                {
-                  type: "Feature",
-                  properties: { name: "Direct High-Exposure Route", stats: baselineStats },
-                  geometry: {
-                    type: "LineString",
-                    coordinates: [[startNode.x, startNode.y], [endNode.x, startNode.y], [endNode.x, endNode.y]]
-                  }
-                }
-              ]
+                toFeature(coolPath, 'Splinter shaded route', coolRouteStats),
+                toFeature(directPath, 'Shortest-distance route', baselineStats),
+              ],
             };
-            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+              type: 'application/geo+json',
+            });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `splinter-thermal-route-${selectedCityId}-${timeString.replace(':', '')}.geojson`;
+            a.download = `splinter-route-${selectedCityId}-${timeString.replace(':', '')}.geojson`;
             a.click();
+            URL.revokeObjectURL(url);
           }}
           className="text-xs px-3.5 py-1.5 rounded-xl bg-blue-600/15 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white transition flex items-center gap-2 font-mono font-medium"
         >
@@ -484,22 +634,23 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
             </div>
             <input
               type="range"
-              min={8 * 60}
-              max={18 * 60}
+              min={DAY_START_MIN}
+              max={DAY_END_MIN}
               step={5}
               value={timeMinutes}
               onChange={(e) => setTimeMinutes(parseInt(e.target.value))}
+              aria-label="Time of day"
               className="w-full accent-blue-500 cursor-pointer h-2 bg-zinc-800 rounded-lg"
             />
-            <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
-              <span>08:00 (East)</span>
+            <div className="flex items-center justify-between text-xs text-zinc-400 font-mono">
+              <span>06:00</span>
               <button
                 onClick={() => setIsPlaying(!isPlaying)}
-                className="text-blue-400 hover:text-blue-300 font-bold uppercase px-2.5 py-0.5 bg-zinc-900 rounded-lg border border-zinc-800 flex items-center gap-1"
+                className="text-blue-400 hover:text-blue-300 font-semibold px-2.5 py-0.5 bg-zinc-900 rounded-lg border border-zinc-800 flex items-center gap-1"
               >
-                {isPlaying ? <><Pause className="w-2.5 h-2.5" /> Pause</> : <><Play className="w-2.5 h-2.5" /> Animate Sun</>}
+                {isPlaying ? <><Pause className="w-2.5 h-2.5" /> Pause</> : <><Play className="w-2.5 h-2.5" /> Play</>}
               </button>
-              <span>18:00 (West)</span>
+              <span>20:00</span>
             </div>
           </div>
 
@@ -570,14 +721,26 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
           <div className="space-y-2">
             <div className="text-xs text-zinc-300 font-semibold flex items-center justify-between">
               <span className="flex items-center gap-1.5"><Layers className="w-3.5 h-3.5 text-purple-400" /> Overlays</span>
-              <button
-                onClick={() => setShowThermalHeatmap(!showThermalHeatmap)}
-                className={`text-[10px] px-2 py-0.5 rounded font-mono border transition ${
-                  showThermalHeatmap ? 'bg-rose-950 text-rose-300 border-rose-600' : 'bg-zinc-900 text-zinc-400 border-zinc-800'
-                }`}
-              >
-                {showThermalHeatmap ? 'Heatmap ON' : 'Heatmap OFF'}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setShowTrees(!showTrees)}
+                  aria-pressed={showTrees}
+                  className={`text-xs px-2 py-0.5 rounded font-mono border transition ${
+                    showTrees ? 'bg-emerald-950 text-emerald-300 border-emerald-600' : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                  }`}
+                >
+                  Trees
+                </button>
+                <button
+                  onClick={() => setShowThermalHeatmap(!showThermalHeatmap)}
+                  aria-pressed={showThermalHeatmap}
+                  className={`text-xs px-2 py-0.5 rounded font-mono border transition ${
+                    showThermalHeatmap ? 'bg-rose-950 text-rose-300 border-rose-600' : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                  }`}
+                >
+                  Heat
+                </button>
+              </div>
             </div>
             {/* Routing Persona Profiles */}
             <div className="flex items-center gap-1">
@@ -801,56 +964,91 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
             <line x1="50" y1="363" x2="800" y2="363" stroke="#eab308" strokeWidth="1.5" strokeDasharray="8,8" opacity="0.4" />
             <line x1="50" y1="458" x2="800" y2="458" stroke="#eab308" strokeWidth="1.5" strokeDasharray="8,8" opacity="0.4" />
 
-            {/* Thermal Heatmap Microclimate Overlay */}
+            {/* Thermal overlay: computed effective temperature per cell.
+                This replaces three fixed blurred circles whose positions and
+                colours never responded to the sun, the buildings or the
+                temperature. */}
             {showThermalHeatmap && (
-              <g opacity="0.45" style={{ mixBlendMode: 'screen' }}>
-                <circle cx="760" cy="300" r="160" fill="#f43f5e" filter="blur(25px)" opacity="0.7" />
-                <circle cx="240" cy="360" r="120" fill="#10b981" filter="blur(25px)" opacity="0.8" />
-                <circle cx="450" cy="200" r="140" fill="#3b82f6" filter="blur(25px)" opacity="0.6" />
+              <g opacity="0.4">
+                {thermalCells.map((cell) => {
+                  const span = heatRange.hi - heatRange.lo;
+                  const t = span <= 0 ? 0 : (cell.tempC - heatRange.lo) / span;
+                  return (
+                    <rect
+                      key={`heat-${cell.x}-${cell.y}`}
+                      x={cell.x}
+                      y={cell.y}
+                      width={HEATMAP_CELL_PX}
+                      height={HEATMAP_CELL_PX}
+                      fill={`hsl(${Math.round(160 - t * 160)} 70% 50%)`}
+                    />
+                  );
+                })}
               </g>
             )}
 
-            {/* 1. Render Cast Building Shadows (Extruded Geometry) */}
+            {/* 1. Cast building shadows: convex hull of footprint + projection */}
             {shadowPolygons.map((sp) => (
               <polygon
                 key={`shadow-${sp.buildingId}`}
-                points={sp.shadowExtrusion.map(p => `${p.x},${p.y}`).join(' ')}
+                points={sp.hull.map((p) => `${p.x},${p.y}`).join(' ')}
                 fill="url(#shadowGradient)"
                 stroke="#181824"
                 strokeWidth="0.5"
               />
             ))}
 
-            {/* 2. Tree Shadows & Canopies */}
+            {/* 2. Tree canopy shadows, cast from the tree's own height */}
+            {treeShadows.map((s) => (
+              <circle
+                key={`tree-shadow-${s.id}`}
+                cx={s.x}
+                cy={s.y}
+                r={s.r}
+                fill="rgba(0, 0, 0, 0.7)"
+              />
+            ))}
+
+            {/* 3. Tree canopies */}
             {showTrees && customTrees.map((t) => (
               <g key={`tree-${t.id}`}>
-                {/* Tree Cast Shadow */}
-                <ellipse
-                  cx={t.x + (shadowPolygons[0]?.dx ? shadowPolygons[0].dx * 0.35 : 10)}
-                  cy={t.y + (shadowPolygons[0]?.dy ? shadowPolygons[0].dy * 0.35 : 10)}
-                  rx={t.radius * 1.3}
-                  ry={t.radius * 0.9}
-                  fill="rgba(0, 0, 0, 0.75)"
-                />
-                {/* Tree Foliage Clusters */}
                 <circle cx={t.x} cy={t.y} r={t.radius} fill="#065f46" stroke="#10b981" strokeWidth="1.5" opacity="0.95" />
                 <circle cx={t.x - 4} cy={t.y - 3} r={t.radius * 0.6} fill="#047857" opacity="0.8" />
                 <circle cx={t.x + 3} cy={t.y + 3} r={t.radius * 0.4} fill="#059669" opacity="0.8" />
               </g>
             ))}
 
-            {/* 3. IoT Microclimate Sensor Stations */}
-            {IOT_SENSOR_STATIONS.map((sensor) => (
-              <g key={sensor.id} className="cursor-pointer">
-                <circle cx={sensor.x} cy={sensor.y} r="14" fill="rgba(59, 130, 246, 0.15)" stroke="#3b82f6" strokeWidth="1" strokeDasharray="3,3" />
-                <circle cx={sensor.x} cy={sensor.y} r="4.5" fill="#38bdf8" />
-                <text x={sensor.x + 16} y={sensor.y + 4} fill="#38bdf8" fontSize="8.5" fontFamily="JetBrains Mono, monospace" fontWeight="bold">
-                  {sensor.currentTempC}°C
-                </text>
-              </g>
-            ))}
+            {/* 4. Probe points. These read out the model's computed temperature at
+                a location. They previously displayed hardcoded numbers such as
+                45.2 C and 1040 W/m2 while being labelled IoT sensor stations. */}
+            {PROBE_POINTS.map((probe) => {
+              const shaded = isShaded(probe, shadeGeometry);
+              const tempC = effectiveTempC(baseTemperature, shaded ? 1 : 0, solar.elevationDeg);
+              return (
+                <g key={probe.id}>
+                  <circle
+                    cx={probe.x}
+                    cy={probe.y}
+                    r="4.5"
+                    fill={shaded ? '#34d399' : '#fb7185'}
+                    stroke="#09090b"
+                    strokeWidth="1"
+                  />
+                  <text
+                    x={probe.x + 9}
+                    y={probe.y + 4}
+                    fill={shaded ? '#34d399' : '#fb7185'}
+                    fontSize="8.5"
+                    fontFamily="JetBrains Mono, monospace"
+                    fontWeight="bold"
+                  >
+                    {tempC.toFixed(1)}°C
+                  </text>
+                </g>
+              );
+            })}
 
-            {/* 4. Direct Route (High Exposure Red Dashed Line) */}
+            {/* 5. Shortest-distance route */}
             <polyline
               points={directPathPoints}
               fill="none"
@@ -860,26 +1058,16 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
               opacity="0.85"
             />
 
-            {/* 5. Splinter Shaded Route (Emerald Glowing Neon Line) */}
+            {/* 6. Shaded route. Drawn second so it reads on top when the two
+                searches return the same path. */}
             <polyline
               points={coolPathPoints}
               fill="none"
-              stroke="url(#coolRouteGradient)"
-              strokeWidth="6"
+              stroke="#10b981"
+              strokeWidth={routesIdentical ? 3 : 6}
               strokeLinecap="round"
               strokeLinejoin="round"
-              style={{ filter: 'drop-shadow(0 0 6px rgba(16, 185, 129, 0.7))' }}
-            />
-
-            {/* Animated Walking Beacon */}
-            <circle
-              cx={coolPathNodes[1]?.x || startNode.x}
-              cy={coolPathNodes[1]?.y || startNode.y}
-              r="8"
-              fill="#10b981"
-              stroke="#ffffff"
-              strokeWidth="2"
-              className="animate-ping opacity-75"
+              strokeDasharray={routesIdentical ? '2,6' : undefined}
             />
 
             {/* Sidewalk Intersection Nodes (Interactive Clickable) */}
@@ -927,66 +1115,29 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
               );
             })}
 
-            {/* 6. 2.5D Isometric Building Blocks */}
-            {SAMPLE_BUILDINGS.map((b) => {
-              const isSelected = selectedBuildingId === b.id;
+            {/* 6. 2.5D Isometric Building Blocks (from OSM) */}
+            {osmBuildings.map((b) => {
+              const isSelected = selectedBuildingId === String(b.id);
               const sp = shadowPolygons.find(s => s.buildingId === b.id);
-              const height = buildingHeights[b.id] || b.buildingHeightM;
+              const height = b.heightM ?? buildingHeights[b.id] ?? 25;
 
               return (
                 <g
                   key={b.id}
-                  onClick={() => setSelectedBuildingId(isSelected ? null : b.id)}
-                  onMouseEnter={() => setHoveredBuilding({ ...b, height, shadowLen: sp?.shadowLengthM || 0 })}
-                  onMouseLeave={() => setHoveredBuilding(null)}
+                  onClick={() => setSelectedBuildingId(isSelected ? null : String(b.id))}
                   className="cursor-pointer transition"
                 >
                   {/* Building Base & 3D Extrusion Effect */}
-                  <rect
-                    x={b.x}
-                    y={b.y}
-                    width={b.width}
-                    height={b.height}
+                  <polygon
+                    points={b.footprint.map(p => `${p.x},${p.y}`).join(' ')}
                     fill={isSelected ? '#2563eb' : '#1e1e24'}
                     stroke={isSelected ? '#60a5fa' : '#2e2e38'}
                     strokeWidth={isSelected ? 2 : 1}
-                    rx="6"
                   />
 
                   {/* Rooftop Solar Panels / Mechanical Grid */}
-                  <rect
-                    x={b.x + 6}
-                    y={b.y + 6}
-                    width={b.width - 12}
-                    height={b.height - 12}
-                    fill="#15151a"
-                    stroke="#272730"
-                    strokeWidth="1"
-                    rx="3"
-                  />
 
                   {/* Building Label */}
-                  <text
-                    x={b.x + b.width / 2}
-                    y={b.y + b.height / 2 - 3}
-                    textAnchor="middle"
-                    fill="#e2e8f0"
-                    fontSize="9.5"
-                    fontFamily="Plus Jakarta Sans, sans-serif"
-                    fontWeight="700"
-                  >
-                    {b.name}
-                  </text>
-                  <text
-                    x={b.x + b.width / 2}
-                    y={b.y + b.height / 2 + 11}
-                    textAnchor="middle"
-                    fill="#94a3b8"
-                    fontSize="8.5"
-                    fontFamily="JetBrains Mono, monospace"
-                  >
-                    {height}m ({sp?.shadowLengthM || 0}m shade)
-                  </text>
                 </g>
               );
             })}
@@ -994,13 +1145,13 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
         </div>
 
         {/* Selected Building Height Tweaker Modal */}
-        {selectedBuildingId && (
+        {selectedBuildingId && osmBuildings.find(b => String(b.id) === selectedBuildingId) && (
           <div className="mt-4 p-4 bg-zinc-900 border border-blue-500/40 rounded-xl flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <Settings2 className="w-5 h-5 text-blue-400" />
               <div>
                 <div className="text-xs font-semibold text-zinc-100">
-                  Building Height Tweaker: {SAMPLE_BUILDINGS.find(b => b.id === selectedBuildingId)?.name}
+                  Building Height Tweaker: OSM Building #{selectedBuildingId}
                 </div>
                 <div className="text-[11px] text-zinc-400">
                   Dynamically shifts shadow cast length across street grid
@@ -1034,180 +1185,194 @@ export const ShadowRouterSimulator: React.FC<ShadowRouterSimulatorProps> = ({ us
         )}
       </div>
 
-      {/* Route Comparison & Turn-by-Turn Guidance Cards */}
+      {/* Route comparison. Every figure below is computed from the graph and the
+          current shadow geometry. */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        {/* Direct Route Card */}
-        <div className="bg-[#121216] p-5 sm:p-6 rounded-2xl border border-zinc-800 flex flex-col justify-between shadow-lg">
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <div className="w-2.5 h-2.5 rounded-full bg-rose-500"></div>
-                <h3 className="text-sm font-bold text-zinc-200">Standard Shortest Navigation</h3>
+        {/* Shortest-distance route */}
+        <div className="bg-[#121216] p-5 sm:p-6 rounded-2xl border border-zinc-800 flex flex-col">
+          <div className="flex items-center gap-2 mb-4">
+            <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
+            <h3 className="text-sm font-semibold text-zinc-200">Shortest distance</h3>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 mb-5">
+            <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
+              <div className="text-xs text-zinc-400 mb-1">Distance</div>
+              <div className="text-base font-mono font-semibold text-zinc-200">
+                {baselineStats.distanceMeters} m
               </div>
-              <span className="text-xs font-mono text-rose-400 bg-rose-950/60 px-2.5 py-0.5 rounded-full border border-rose-800/40 font-bold">
-                HIGH HEAT EXPOSURE
-              </span>
+              <div className="text-xs text-zinc-500">{baselineStats.walkingTimeMin} min</div>
             </div>
 
-            <div className="grid grid-cols-3 gap-3 mb-5">
-              <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
-                <div className="text-[11px] text-zinc-400 mb-1">Walking Distance</div>
-                <div className="text-base font-mono font-bold text-zinc-200">
-                  {baselineStats.distanceMeters}m
-                </div>
-                <div className="text-[10px] text-zinc-400">{baselineStats.walkingTimeMin} min</div>
+            <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
+              <div className="text-xs text-zinc-400 mb-1">In shade</div>
+              <div className="text-base font-mono font-semibold text-rose-400">
+                {baselineStats.shadeCoveragePercent}%
               </div>
-
-              <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
-                <div className="text-[11px] text-zinc-400 mb-1">Shade Coverage</div>
-                <div className="text-base font-mono font-bold text-rose-400">
-                  {baselineStats.shadeCoveragePercent}%
-                </div>
-                <div className="text-[10px] text-zinc-400">Direct Sun Radiation</div>
-              </div>
-
-              <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
-                <div className="text-[11px] text-zinc-400 mb-1">Perceived Temp</div>
-                <div className="text-base font-mono font-bold text-rose-400">
-                  {baselineStats.perceivedTempC}°C
-                </div>
-                <div className="text-[10px] text-zinc-400">Sweat: {baselineStats.estimatedSweatLossMl}ml/hr</div>
-              </div>
+              <div className="text-xs text-zinc-500">length-weighted</div>
             </div>
 
-            {/* Turn by turn */}
-            <div className="space-y-2">
-              <div className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Turn-by-Turn Steps</div>
-              {baselineStats.steps.map((s, idx) => (
-                <div key={s.id} className="p-3 bg-zinc-900/50 rounded-xl border border-zinc-800/80 text-xs flex items-start gap-3">
-                  <span className="w-5 h-5 rounded-lg bg-rose-950 text-rose-400 font-mono text-[10px] flex items-center justify-center shrink-0 font-bold">
-                    {idx + 1}
-                  </span>
-                  <div>
-                    <div className="text-zinc-200 font-medium">{s.instruction}</div>
-                    <div className="text-[11px] text-zinc-400 mt-1 flex items-center gap-2 font-mono">
-                      <span>{s.distanceMeters}m</span> • <span className="text-rose-400">{s.tempC}°C perceived</span> • <span>{s.landmark}</span>
-                    </div>
+            <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
+              <div className="text-xs text-zinc-400 mb-1">Effective temp</div>
+              <div className="text-base font-mono font-semibold text-rose-400">
+                {baselineStats.effectiveTempC}°C
+              </div>
+              <div className="text-xs text-zinc-500">ambient {baseTemperature.toFixed(1)}°C</div>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+              Legs
+            </div>
+            {baselineStats.steps.length === 0 && (
+              <p className="text-xs text-zinc-500">No route between these waypoints.</p>
+            )}
+            {baselineStats.steps.map((s, idx) => (
+              <div key={s.id} className="p-3 bg-zinc-900/50 rounded-xl border border-zinc-800/80 text-xs flex items-start gap-3">
+                <span className="w-5 h-5 rounded-lg bg-rose-950 text-rose-400 font-mono text-xs flex items-center justify-center shrink-0 font-semibold">
+                  {idx + 1}
+                </span>
+                <div>
+                  <div className="text-zinc-200">{s.instruction}</div>
+                  <div className="text-xs text-zinc-500 mt-1 flex flex-wrap items-center gap-x-2 font-mono">
+                    <span>{s.distanceMeters} m</span>
+                    <span>·</span>
+                    <span>{s.shadePercent}% shaded</span>
+                    <span>·</span>
+                    <span className="text-rose-400">{s.effectiveTempC}°C</span>
                   </div>
                 </div>
-              ))}
-            </div>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Splinter Cool Route Card */}
-        <div className="bg-[#121216] p-5 sm:p-6 rounded-2xl border border-emerald-500/40 flex flex-col justify-between shadow-lg glow-emerald">
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></div>
-                <h3 className="text-sm font-bold text-white">Splinter Thermal Shaded Route</h3>
-              </div>
-              <span className="text-xs font-mono text-emerald-300 bg-emerald-950/80 px-2.5 py-0.5 rounded-full border border-emerald-500/40 font-bold">
-                OPTIMAL COMFORT
-              </span>
-            </div>
+        {/* Thermal route */}
+        <div className="bg-[#121216] p-5 sm:p-6 rounded-2xl border border-emerald-500/30 flex flex-col">
+          <div className="flex items-center gap-2 mb-4">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+            <h3 className="text-sm font-semibold text-white">Shade-weighted</h3>
+          </div>
 
-            <div className="grid grid-cols-3 gap-3 mb-5">
-              <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
-                <div className="text-[11px] text-zinc-400 mb-1">Walking Distance</div>
-                <div className="text-base font-mono font-bold text-emerald-400">
-                  {coolRouteStats.distanceMeters}m
-                </div>
-                <div className="text-[10px] text-zinc-400">{coolRouteStats.walkingTimeMin} min (+2m)</div>
-              </div>
+          {routesIdentical && (
+            <p className="mb-4 rounded-xl border border-zinc-700 bg-zinc-900/80 px-3 py-2 text-xs text-zinc-300">
+              The thermal search returned the same path as the shortest route — at
+              this sun angle no detour reduces exposure enough to be worth the
+              extra distance. That is a valid result, not a failure.
+            </p>
+          )}
 
-              <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
-                <div className="text-[11px] text-zinc-400 mb-1">Shade Coverage</div>
-                <div className="text-base font-mono font-bold text-emerald-400">
-                  {coolRouteStats.shadeCoveragePercent}%
-                </div>
-                <div className="text-[10px] text-emerald-400">+{coolRouteStats.shadeCoveragePercent - baselineStats.shadeCoveragePercent}% Protection</div>
+          <div className="grid grid-cols-3 gap-3 mb-5">
+            <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
+              <div className="text-xs text-zinc-400 mb-1">Distance</div>
+              <div className="text-base font-mono font-semibold text-emerald-400">
+                {coolRouteStats.distanceMeters} m
               </div>
-
-              <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
-                <div className="text-[11px] text-zinc-400 mb-1">Perceived Temp</div>
-                <div className="text-base font-mono font-bold text-emerald-400">
-                  {coolRouteStats.perceivedTempC}°C
-                </div>
-                <div className="text-[10px] text-emerald-400">-{(baselineStats.perceivedTempC - coolRouteStats.perceivedTempC).toFixed(1)}°C Relief</div>
+              <div className="text-xs text-zinc-500">
+                {coolRouteStats.walkingTimeMin} min
+                {timePenaltyMin !== 0 && ` (${timePenaltyMin > 0 ? '+' : ''}${timePenaltyMin})`}
               </div>
             </div>
 
-            {/* Turn by turn */}
-            <div className="space-y-2">
-              <div className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Turn-by-Turn Guidance HUD</div>
-              {coolRouteStats.steps.map((s, idx) => (
-                <div key={s.id} className="p-3 bg-emerald-950/20 rounded-xl border border-emerald-900/40 text-xs flex items-start gap-3">
-                  <span className="w-5 h-5 rounded-lg bg-emerald-950 text-emerald-400 font-mono text-[10px] flex items-center justify-center shrink-0 font-bold">
-                    {idx + 1}
-                  </span>
-                  <div>
-                    <div className="text-zinc-100 font-semibold">{s.instruction}</div>
-                    <div className="text-[11px] text-zinc-400 mt-1 flex items-center gap-2 font-mono">
-                      <span>{s.distanceMeters}m</span> • <span className="text-emerald-400 font-bold">{s.shadePercent}% Shaded ({s.tempC}°C)</span> • <span>{s.landmark}</span>
-                    </div>
-                  </div>
-                </div>
-              ))}
+            <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
+              <div className="text-xs text-zinc-400 mb-1">In shade</div>
+              <div className="text-base font-mono font-semibold text-emerald-400">
+                {coolRouteStats.shadeCoveragePercent}%
+              </div>
+              <div className="text-xs text-emerald-400">
+                {shadeGainPct > 0 ? `+${shadeGainPct} pts` : `${shadeGainPct} pts`}
+              </div>
             </div>
 
-            <div className="mt-4 p-3 bg-emerald-950/40 border border-emerald-800/40 rounded-xl text-xs text-emerald-300 flex items-center justify-between">
-              <div>
-                <strong>Physiological Impact:</strong> Reduces UV exposure dosage by <strong>78%</strong> and eliminates <strong>{baselineStats.estimatedSweatLossMl - coolRouteStats.estimatedSweatLossMl}ml/hr</strong> dehydration strain.
+            <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800">
+              <div className="text-xs text-zinc-400 mb-1">Effective temp</div>
+              <div className="text-base font-mono font-semibold text-emerald-400">
+                {coolRouteStats.effectiveTempC}°C
+              </div>
+              <div className="text-xs text-emerald-400">
+                {tempReliefC > 0 ? '−' : ''}
+                {Math.abs(tempReliefC).toFixed(1)}°C
               </div>
             </div>
           </div>
+
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+              Legs
+            </div>
+            {coolRouteStats.steps.length === 0 && (
+              <p className="text-xs text-zinc-500">No route between these waypoints.</p>
+            )}
+            {coolRouteStats.steps.map((s, idx) => (
+              <div key={s.id} className="p-3 bg-emerald-950/20 rounded-xl border border-emerald-900/40 text-xs flex items-start gap-3">
+                <span className="w-5 h-5 rounded-lg bg-emerald-950 text-emerald-400 font-mono text-xs flex items-center justify-center shrink-0 font-semibold">
+                  {idx + 1}
+                </span>
+                <div>
+                  <div className="text-zinc-100">{s.instruction}</div>
+                  <div className="text-xs text-zinc-500 mt-1 flex flex-wrap items-center gap-x-2 font-mono">
+                    <span>{s.distanceMeters} m</span>
+                    <span>·</span>
+                    <span className="text-emerald-400">{s.shadePercent}% shaded</span>
+                    <span>·</span>
+                    <span>{s.effectiveTempC}°C</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <p className="mt-4 text-xs leading-relaxed text-zinc-500">
+            Trade-off: {distancePenaltyM >= 0 ? '+' : ''}{distancePenaltyM} m for{' '}
+            {shadeGainPct >= 0 ? '+' : ''}{shadeGainPct} percentage points of shade.
+            Effective temperature is a simplified exposure model — it is not UTCI,
+            PET or mean radiant temperature, and it says nothing about
+            physiological risk.
+          </p>
         </div>
       </div>
 
-      {/* Urban Canopy & Heat Island Mitigation Telemetry Deck */}
-      <div className="bg-[#121216] p-5 rounded-2xl border border-zinc-800 mb-6 shadow-lg">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
-          <div className="flex items-center gap-2">
-            <Trees className="w-4 h-4 text-emerald-400" />
-            <h3 className="text-sm font-bold text-zinc-100">Urban Forestry & Heat Island (UHI) Mitigation Metrics</h3>
-          </div>
-          <span className="text-[10px] font-mono uppercase bg-emerald-950/60 text-emerald-300 border border-emerald-800/40 px-2.5 py-0.5 rounded-full">
-            Active Urban Forestry Layer
-          </span>
+      {/* Canopy figures. Shade area is measured from the tree shadow circles the
+          model actually casts, rather than assuming a fixed radius per tree.
+          Evaporative cooling in kWh/day and a heat-stroke risk percentage used to
+          appear here; both were invented and neither is computable from this
+          model, so they are gone. */}
+      <div className="bg-[#121216] p-5 rounded-2xl border border-zinc-800 mb-6">
+        <div className="flex items-center gap-2 mb-4">
+          <Trees className="w-4 h-4 text-emerald-400" />
+          <h3 className="text-sm font-semibold text-zinc-100">Canopy</h3>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
           <div className="p-3.5 bg-[#0a0a0d] rounded-xl border border-zinc-800">
-            <div className="text-[11px] text-zinc-400 mb-1">Total Canopy Trees</div>
-            <div className="text-xl font-bold font-mono text-emerald-400 flex items-baseline gap-1.5">
+            <div className="text-xs text-zinc-400 mb-1">Trees on grid</div>
+            <div className="text-xl font-semibold font-mono text-emerald-400">
               {customTrees.length}
-              <span className="text-[11px] font-sans font-normal text-zinc-400">specimens</span>
             </div>
-            <div className="text-[10px] text-zinc-400 mt-1">+{customTrees.length - SAMPLE_TREES.length} custom planted</div>
+            <div className="text-xs text-zinc-500 mt-1">
+              {customTrees.length - SAMPLE_TREES.length} planted by you
+            </div>
           </div>
 
           <div className="p-3.5 bg-[#0a0a0d] rounded-xl border border-zinc-800">
-            <div className="text-[11px] text-zinc-400 mb-1">Shaded Surface Area</div>
-            <div className="text-xl font-bold font-mono text-blue-400 flex items-baseline gap-1.5">
-              {Math.round(customTrees.length * 3.14159 * 16 * 16 * 0.42)}
-              <span className="text-[11px] font-sans font-normal text-zinc-400">m²</span>
+            <div className="text-xs text-zinc-400 mb-1">Canopy shade cast</div>
+            <div className="text-xl font-semibold font-mono text-blue-400">
+              {canopyShadeAreaM2.toLocaleString()}
+              <span className="ml-1.5 text-xs font-sans font-normal text-zinc-400">m²</span>
             </div>
-            <div className="text-[10px] text-zinc-400 mt-1">Ground radiant interception</div>
+            <div className="text-xs text-zinc-500 mt-1">
+              {isDaylight ? 'at the current sun angle' : 'sun below horizon'}
+            </div>
           </div>
 
           <div className="p-3.5 bg-[#0a0a0d] rounded-xl border border-zinc-800">
-            <div className="text-[11px] text-zinc-400 mb-1">Evaporative Cooling</div>
-            <div className="text-xl font-bold font-mono text-purple-400 flex items-baseline gap-1.5">
-              {(customTrees.length * 2.8).toFixed(1)}
-              <span className="text-[11px] font-sans font-normal text-zinc-400">kWh/day</span>
+            <div className="text-xs text-zinc-400 mb-1">Route shade gain</div>
+            <div className="text-xl font-semibold font-mono text-emerald-400">
+              {shadeGainPct >= 0 ? '+' : ''}{shadeGainPct}
+              <span className="ml-1.5 text-xs font-sans font-normal text-zinc-400">pts</span>
             </div>
-            <div className="text-[10px] text-zinc-400 mt-1">Thermal dissipation rate</div>
-          </div>
-
-          <div className="p-3.5 bg-[#0a0a0d] rounded-xl border border-zinc-800">
-            <div className="text-[11px] text-zinc-400 mb-1">Thermal Risk Reduction</div>
-            <div className="text-xl font-bold font-mono text-emerald-400 flex items-baseline gap-1.5">
-              -{(baselineStats.perceivedTempC - coolRouteStats.perceivedTempC).toFixed(1)}°C
-              <span className="text-[11px] font-sans font-normal text-zinc-400">UTCI</span>
-            </div>
-            <div className="text-[10px] text-zinc-400 mt-1">68% lower heat stroke risk</div>
+            <div className="text-xs text-zinc-500 mt-1">shaded vs shortest</div>
           </div>
         </div>
       </div>

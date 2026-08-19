@@ -1,59 +1,187 @@
 @import "tailwindcss";
 
+/* ------------------------------------------------------------------
+   Splinter design tokens — "Cool Daylight"
+   Semantic names, defined once. Components reference bg-canvas /
+   text-ink / text-muted / bg-primary rather than raw hex, so the
+   palette can be retuned here without touching every page.
+
+   Contrast (WCAG AA, verified):
+     ink    #0B3B2E on canvas ..... 13.0:1
+     muted  #4A6B60 on canvas ...... 5.6:1
+     primary#047857 on white ....... 5.5:1  (and white on it: 5.5:1)
+   The brighter emerald / amber / rose below are for fills, icons and
+   indicators — each has a darker *-ink pair for use as text.
+   ------------------------------------------------------------------ */
+@theme {
+  /* Surfaces */
+  --color-canvas: #f6fbf8;
+  --color-canvas-alt: #eef6f1;
+  --color-surface: #ffffff;
+  --color-line: #d9e7e0;
+  --color-line-strong: #bfd5ca;
+
+  /* Text */
+  --color-ink: #0b3b2e;
+  --color-body: #24473c;
+  --color-muted: #4a6b60;
+
+  /* Primary — shade / cool */
+  --color-primary: #047857;
+  --color-primary-hover: #065f46;
+  --color-primary-bright: #10b981;
+  --color-primary-soft: #d1fae5;
+
+  /* Accent — sun / heat */
+  --color-accent: #f59e0b;
+  --color-accent-ink: #92400e;
+  --color-accent-soft: #fef3c7;
+
+  /* Danger — heat risk */
+  --color-danger: #e11d48;
+  --color-danger-ink: #be123c;
+  --color-danger-soft: #ffe4e6;
+
+  /* Info — data / cool water */
+  --color-info: #0891b2;
+  --color-info-ink: #0e7490;
+  --color-info-soft: #cffafe;
+
+  /* Fonts */
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, monospace;
+}
+
 @layer base {
-  body {
-    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    background-color: #070709;
-    color: #f1f5f9;
-    overflow-x: hidden;
+  html {
+    scroll-behavior: smooth;
+    /* Anchored sections clear the sticky header instead of hiding under it. */
+    scroll-padding-top: 5rem;
   }
-  
-  code, pre, kbd, samp, .font-mono {
-    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-canvas);
+    color: var(--color-body);
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  code,
+  pre,
+  kbd,
+  samp,
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+
+  /* Keyboard focus is visible everywhere, and only for keyboard users. */
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
 }
 
-/* Custom sleek scrollbar */
+/* Light-appropriate scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #09090b;
+  background: var(--color-canvas-alt);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #27272a;
-  border-radius: 4px;
+  background: var(--color-line-strong);
+  border-radius: 6px;
+  border: 2px solid var(--color-canvas-alt);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3f3f46;
+  background: #9dbdae;
 }
 
-/* Glowing utilities */
-.glow-emerald {
-  box-shadow: 0 0 25px -5px rgba(16, 185, 129, 0.35);
+/* Soft elevation for cards on a light canvas. Replaces the old neon
+   `glow-*` utilities, which only read as "glow" against near-black. */
+.lift {
+  box-shadow:
+    0 1px 2px rgba(11, 59, 46, 0.04),
+    0 4px 12px rgba(11, 59, 46, 0.05);
 }
 
-.glow-blue {
-  box-shadow: 0 0 25px -5px rgba(59, 130, 246, 0.35);
+.lift-lg {
+  box-shadow:
+    0 2px 4px rgba(11, 59, 46, 0.04),
+    0 12px 32px rgba(11, 59, 46, 0.08);
 }
 
-.glow-rose {
-  box-shadow: 0 0 25px -5px rgba(244, 63, 94, 0.35);
+.lift-primary {
+  box-shadow: 0 8px 24px -6px rgba(4, 120, 87, 0.35);
 }
 
-.glow-amber {
-  box-shadow: 0 0 25px -5px rgba(245, 158, 11, 0.35);
+.lift-accent {
+  box-shadow: 0 8px 24px -6px rgba(245, 158, 11, 0.35);
+}
+
+/* Sun-warmed mesh for the hero, kept very low contrast so text stays legible. */
+.hero-wash {
+  background-image:
+    radial-gradient(60rem 30rem at 15% 0%, rgba(16, 185, 129, 0.13), transparent 60%),
+    radial-gradient(45rem 26rem at 85% 10%, rgba(245, 158, 11, 0.14), transparent 60%),
+    radial-gradient(50rem 30rem at 50% 100%, rgba(8, 145, 178, 0.09), transparent 65%);
+}
+
+/* Faint blueprint grid — evokes the GIS/plan drawing without adding noise. */
+.blueprint {
+  background-image:
+    linear-gradient(to right, rgba(11, 59, 46, 0.055) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(11, 59, 46, 0.055) 1px, transparent 1px);
+  background-size: 40px 40px;
 }
 
 @keyframes pulse-subtle {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.85; transform: scale(1.02); }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
 }
 
 .animate-pulse-subtle {
   animation: pulse-subtle 3s ease-in-out infinite;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-rise {
+  animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

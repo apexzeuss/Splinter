@@ -3,8 +3,16 @@ export interface UserCoords {
   lng: number;
   city: string;
   tempC: number;
+  /**
+   * True only when lat/lng came from GPS, IP lookup or an explicit user choice.
+   * The built-in default must set this false — the footer and header render a
+   * "live" state from it, and they previously claimed live GPS while showing
+   * hardcoded Phoenix coordinates.
+   */
   isLive: boolean;
-  source?: 'GPS' | 'IP' | 'MANUAL' | 'DEFAULT';
+  source: 'GPS' | 'IP' | 'MANUAL' | 'DEFAULT';
+  /** Real local UTC offset when known, e.g. from Open-Meteo's utc_offset_seconds. */
+  utcOffsetHours?: number;
 }
 
 export type DocId = 'README.md' | 'project-plan.md' | 'prd.md' | 'architecture.md' | 'memory.md' | 'handoff.md';
@@ -89,6 +97,10 @@ export interface CityPreset {
   longitude: number;
   timezone: string;
   typicalSummerHighC: number;
+  /** Published urban-core-vs-rural heat delta. Reference figure, not measured here. */
+  urbanHeatIslandPenaltyC?: number;
+  /** Real local UTC offset when known; otherwise estimated from longitude. */
+  utcOffsetHours?: number;
 }
 
 export interface Waypoint {
@@ -103,20 +115,33 @@ export interface TurnInstruction {
   id: string;
   instruction: string;
   distanceMeters: number;
+  /** Measured against the current shadow geometry, not assumed. */
   shadePercent: number;
-  tempC: number;
-  landmark: string;
+  /** Simplified exposure-weighted temperature. See router.ts effectiveTempC. */
+  effectiveTempC: number;
+  /** Name of the graph node this leg ends at. */
+  toNodeName: string;
 }
 
+/**
+ * Route statistics. Every field is derived from the graph and the current
+ * shadow geometry.
+ *
+ * Fields deliberately absent, because the app has no basis for them:
+ * meanRadiantTempC, perceivedTempC, thermalDiscomfortIndex and
+ * estimatedSweatLossMl. Those were presented as physiological measurements but
+ * were linear guesses off a single input, and sweat loss was literally
+ * `(perceivedTemp / 30) * 480`. Reinstate them only alongside a real UTCI or PET
+ * implementation with wind and humidity inputs.
+ */
 export interface RouteStats {
   distanceMeters: number;
   walkingTimeMin: number;
   shadeCoveragePercent: number;
-  meanRadiantTempC: number;
-  perceivedTempC: number;
-  thermalDiscomfortIndex: number;
-  uvIndex: number;
-  estimatedSweatLossMl: number;
+  /** Simplified exposure-weighted temperature. Not MRT, PET or UTCI. */
+  effectiveTempC: number;
+  /** Clear-sky estimate from solar elevation, not a measurement. */
+  uvIndexEstimate: number;
   steps: TurnInstruction[];
 }
 

@@ -1,4 +1,4 @@
-import { DocId, ProjectDoc, TaskItem, ArchitectureDirective, SplinterNode, SimulationScenario } from '../types';
+import { DocId, ProjectDoc, TaskItem, ArchitectureDirective, SplinterNode, SimulationScenario, CityPreset } from '../types';
 
 export const INITIAL_DOCS: Record<string, ProjectDoc> = {
   'README.md': {
@@ -440,11 +440,23 @@ export const SAMPLE_TREES = [
   { id: 't7', x: 610, y: 360, radius: 14, species: 'Palo Verde', foliageDensity: 0.70 }
 ];
 
-export const CITY_PRESETS = [
-  { id: 'phoenix', name: 'Phoenix, AZ (33.4°N)', latitude: 33.4484, longitude: -112.074, timezone: 'MST', typicalSummerHighC: 43.5, urbanHeatIslandPenaltyC: 5.4 },
-  { id: 'austin', name: 'Austin, TX (30.3°N)', latitude: 30.2672, longitude: -97.7431, timezone: 'CST', typicalSummerHighC: 39.0, urbanHeatIslandPenaltyC: 4.2 },
-  { id: 'seville', name: 'Seville, Spain (37.4°N)', latitude: 37.3891, longitude: -5.9845, timezone: 'CET', typicalSummerHighC: 41.0, urbanHeatIslandPenaltyC: 4.8 },
-  { id: 'dubai', name: 'Dubai, UAE (25.2°N)', latitude: 25.2048, longitude: 55.2708, timezone: 'GST', typicalSummerHighC: 45.0, urbanHeatIslandPenaltyC: 6.1 }
+/**
+ * Simulator city presets.
+ *
+ * `utcOffsetHours` is the offset in effect during the local hot season, which is
+ * what this app is used for. DST transitions are not modelled — a live GPS or
+ * searched location takes its real offset from Open-Meteo's `utc_offset_seconds`
+ * instead. `urbanHeatIslandPenaltyC` is a published reference figure for the
+ * city, not something this app measures.
+ */
+export const CITY_PRESETS: CityPreset[] = [
+  { id: 'phoenix', name: 'Phoenix, AZ (33.4°N)', latitude: 33.4484, longitude: -112.074, timezone: 'MST', utcOffsetHours: -7, typicalSummerHighC: 43.5, urbanHeatIslandPenaltyC: 5.4 },
+  { id: 'las-vegas', name: 'Las Vegas, NV (36.2°N)', latitude: 36.1699, longitude: -115.1398, timezone: 'PDT', utcOffsetHours: -7, typicalSummerHighC: 42.0, urbanHeatIslandPenaltyC: 5.0 },
+  { id: 'austin', name: 'Austin, TX (30.3°N)', latitude: 30.2672, longitude: -97.7431, timezone: 'CDT', utcOffsetHours: -5, typicalSummerHighC: 39.0, urbanHeatIslandPenaltyC: 4.2 },
+  { id: 'seville', name: 'Seville, Spain (37.4°N)', latitude: 37.3891, longitude: -5.9845, timezone: 'CEST', utcOffsetHours: 2, typicalSummerHighC: 41.0, urbanHeatIslandPenaltyC: 4.8 },
+  { id: 'dubai', name: 'Dubai, UAE (25.2°N)', latitude: 25.2048, longitude: 55.2708, timezone: 'GST', utcOffsetHours: 4, typicalSummerHighC: 45.0, urbanHeatIslandPenaltyC: 6.1 },
+  { id: 'singapore', name: 'Singapore (1.4°N)', latitude: 1.3521, longitude: 103.8198, timezone: 'SGT', utcOffsetHours: 8, typicalSummerHighC: 33.0, urbanHeatIslandPenaltyC: 4.5 },
+  { id: 'tokyo', name: 'Tokyo, Japan (35.7°N)', latitude: 35.6762, longitude: 139.6503, timezone: 'JST', utcOffsetHours: 9, typicalSummerHighC: 35.0, urbanHeatIslandPenaltyC: 3.9 }
 ];
 
 export const THERMAL_SCENARIOS = [

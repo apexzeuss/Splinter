@@ -30,14 +30,17 @@ export default function App() {
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
   const [isLocationModalOpen, setIsLocationModalOpen] = useState<boolean>(false);
 
-  // Real Browser Geolocation State
+  // Location state. `isLive` is false until something actually locates the user:
+  // this default is a hardcoded fallback, and the header and footer both render a
+  // "live" indicator from this flag.
   const [userCoords, setUserCoords] = useState<UserCoords | null>({
     lat: 33.4484,
     lng: -112.0740,
     city: 'Phoenix, AZ',
     tempC: 39.5,
-    isLive: true,
-    source: 'DEFAULT'
+    isLive: false,
+    source: 'DEFAULT',
+    utcOffsetHours: -7
   });
   const [isLocating, setIsLocating] = useState<boolean>(false);
 
@@ -47,9 +50,15 @@ export default function App() {
   const handleRequestLocation = async () => {
     setIsLocating(true);
 
-    const resolveWeatherAndCity = async (lat: number, lng: number, fallbackCity: string, isGPS: boolean) => {
+    const resolveWeatherAndCity = async (
+      lat: number,
+      lng: number,
+      fallbackCity: string,
+      source: 'GPS' | 'IP'
+    ) => {
       let resolvedCity = fallbackCity;
-      let temp = 31.5;
+      let temp: number | null = null;
+      let utcOffsetHours: number | undefined;
 
       // 1. Reverse Geocode for clean City/Town name
       try {
@@ -68,27 +77,34 @@ export default function App() {
         console.log("Reverse geocode fallback", e);
       }
 
-      // 2. Fetch live Open-Meteo weather for exact latitude/longitude
+      // 2. Live weather plus the real UTC offset, which the solar calculation
+      //    needs in order to place solar noon correctly.
       try {
         const weatherRes = await fetch(
-          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current_weather=true`
+          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current_weather=true&timezone=auto`
         );
         if (weatherRes.ok) {
           const weatherData = await weatherRes.json();
           if (weatherData.current_weather && typeof weatherData.current_weather.temperature === 'number') {
             temp = weatherData.current_weather.temperature;
           }
+          if (typeof weatherData.utc_offset_seconds === 'number') {
+            utcOffsetHours = weatherData.utc_offset_seconds / 3600;
+          }
         }
       } catch (e) {
         console.log("Weather API fallback", e);
       }
 
-      const finalCoords = {
+      const finalCoords: UserCoords = {
         lat: Math.round(lat * 10000) / 10000,
         lng: Math.round(lng * 10000) / 10000,
         city: resolvedCity,
-        tempC: Math.round(temp * 10) / 10,
-        isLive: true
+        // Fall back to the previous reading rather than inventing 31.5 °C.
+        tempC: temp !== null ? Math.round(temp * 10) / 10 : (userCoords?.tempC ?? 30),
+        isLive: true,
+        source,
+        utcOffsetHours
       };
 
       setUserCoords(finalCoords);
@@ -100,8 +116,10 @@ export default function App() {
           id: `log-${Date.now()}`,
           timestamp: time,
           level: 'success',
-          source: isGPS ? 'GPS_HARDWARE' : 'IP_GEOLOCATION_MESH',
-          message: `Location active: ${resolvedCity} (${finalCoords.lat}°, ${finalCoords.lng}°) · Ambient: ${finalCoords.tempC}°C`
+          source: source === 'GPS' ? 'GPS_HARDWARE' : 'IP_GEOLOCATION',
+          message: `Location set: ${resolvedCity} (${finalCoords.lat}°, ${finalCoords.lng}°)${
+            temp !== null ? ` · ${finalCoords.tempC}°C observed` : ' · no weather reading'
+          }`
         },
         ...prev
       ]);
@@ -115,7 +133,7 @@ export default function App() {
           const ipData = await ipRes.json();
           if (ipData.success && typeof ipData.latitude === 'number') {
             const cityStr = `${ipData.city || 'Local Region'}, ${ipData.country_code || ''}`.trim();
-            await resolveWeatherAndCity(ipData.latitude, ipData.longitude, cityStr, false);
+            await resolveWeatherAndCity(ipData.latitude, ipData.longitude, cityStr, 'IP');
             return;
           }
         }
@@ -130,7 +148,7 @@ export default function App() {
           const ipData2 = await ipRes2.json();
           if (typeof ipData2.latitude === 'number') {
             const cityStr2 = `${ipData2.city || 'Local Area'}, ${ipData2.country_code || ''}`.trim();
-            await resolveWeatherAndCity(ipData2.latitude, ipData2.longitude, cityStr2, false);
+            await resolveWeatherAndCity(ipData2.latitude, ipData2.longitude, cityStr2, 'IP');
             return;
           }
         }
@@ -138,18 +156,28 @@ export default function App() {
         console.log("ipapi.co failed, using standard fallback", err2);
       }
 
-      // Standard default fallback if all offline
-      setUserCoords({
-        lat: 33.4484,
-        lng: -112.0740,
-        city: "Phoenix, AZ",
-        tempC: 39.5,
-        isLive: true
-      });
+      // Nothing located the user. Keep the default coordinates but do not claim
+      // they are live — the previous version set isLive: true here, so the UI
+      // reported "LIVE GPS ONLINE (Phoenix, AZ)" while completely offline.
       setIsLocating(false);
+      const time = new Date().toTimeString().split(' ')[0];
+      setLogs(prev => [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: time,
+          level: 'warn',
+          source: 'GEOLOCATION',
+          message: 'Could not determine location. Showing the Phoenix, AZ default — set a location manually for real figures.'
+        },
+        ...prev
+      ]);
     };
 
-    // Try HTML5 Browser Geolocation first
+    // Try HTML5 Browser Geolocation first.
+    //
+    // enableHighAccuracy is false here because this fires unprompted on load and
+    // a coarse fix is enough to pick a city. The location modal, where the user
+    // explicitly asks to be located, requests high accuracy instead.
     if ('geolocation' in navigator) {
       navigator.geolocation.getCurrentPosition(
         async (position) => {
@@ -157,7 +185,7 @@ export default function App() {
             position.coords.latitude,
             position.coords.longitude,
             "My Location",
-            true
+            'GPS'
           );
         },
         async (error) => {
@@ -171,8 +199,15 @@ export default function App() {
     }
   };
 
-  // Attempt automatic location on startup
+  // Attempt automatic location on startup.
+  //
+  // The ref guard matters: under StrictMode this effect runs twice in
+  // development, which previously fired two geolocation requests and two full
+  // reverse-geocode plus weather chains on every reload.
+  const startupLocationRequested = React.useRef(false);
   useEffect(() => {
+    if (startupLocationRequested.current) return;
+    startupLocationRequested.current = true;
     handleRequestLocation();
   }, []);
 
@@ -384,7 +419,11 @@ export default function App() {
       {/* Footer info */}
       <Footer
         logs={logs}
-        statusText={userCoords?.isLive ? `LIVE GPS ONLINE (${userCoords.city})` : 'STANDING BY'}
+        statusText={
+          userCoords?.isLive
+            ? `${userCoords.source === 'GPS' ? 'GPS' : userCoords.source === 'IP' ? 'IP lookup' : 'Manual'}: ${userCoords.city}`
+            : `Default location (${userCoords?.city ?? 'none'}) — not located`
+        }
         taskId={taskId}
         isExecuting={isSimulating}
       />
